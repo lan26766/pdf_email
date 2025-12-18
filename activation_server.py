@@ -8,11 +8,19 @@ import json
 import base64
 import hashlib
 import logging
+import smtplib
 from datetime import datetime, timedelta
 from functools import wraps
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.utils import formatdate
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+
+# ==================== 新增导入 ====================
+from cryptography.fernet import Fernet
+# ==================== 新增导入结束 ====================
 
 # 配置日志
 logging.basicConfig(
@@ -66,6 +74,46 @@ class Config:
 # 初始化配置
 config = Config()
 
+# ==================== 新增：专业组件初始化 ====================
+def init_professional_components():
+    """初始化专业组件"""
+    try:
+        # 初始化激活码生成器
+        encryption_key = config.ENCRYPTION_KEY
+        if not encryption_key:
+            # 生成一个固定的开发密钥（生产环境必须使用安全的随机密钥）
+            logger.warning("⚠️  ENCRYPTION_KEY 未配置，使用开发密钥")
+            encryption_key = base64.urlsafe_b64encode(b'dev-key-32-bytes-for-testing-only!!')
+        
+        # 确保密钥是字符串
+        if isinstance(encryption_key, bytes):
+            encryption_key = encryption_key.decode('utf-8')
+        
+        cipher = Fernet(encryption_key)
+        logger.info("✅ 加密组件初始化完成")
+        
+        # 初始化邮件发送器配置
+        smtp_configured = all([
+            config.SMTP_HOST,
+            config.SMTP_USER,
+            config.SMTP_PASSWORD
+        ])
+        
+        if smtp_configured:
+            logger.info(f"✅ 邮件服务已配置: {config.SMTP_USER}")
+        else:
+            logger.warning("⚠️  邮件服务未完全配置，将无法发送激活邮件")
+        
+        return cipher, smtp_configured
+        
+    except Exception as e:
+        logger.error(f"❌ 专业组件初始化失败: {e}")
+        return None, False
+
+# 初始化专业组件
+cipher, smtp_configured = init_professional_components()
+# ==================== 新增结束 ====================
+
 # ==================== 数据库初始化 ====================
 
 def safe_init_database():
@@ -113,6 +161,74 @@ def require_api_key(f):
         return f(*args, **kwargs)
     return decorated_function
 
+# ==================== 新增：专业激活码生成函数 ====================
+def generate_professional_activation_code(email, product_type="personal", 
+                                         purchase_id="", product_name=""):
+    """生成专业的激活码（使用Fernet加密）"""
+    try:
+        if not cipher:
+            logger.warning("⚠️  加密组件未初始化，降级到简单激活码")
+            return generate_simple_activation_code(email, product_type)
+        
+        # 根据产品类型设置参数
+        days_valid = 365
+        max_devices = 3
+        
+        if product_type == 'business':
+            days_valid = 365 * 2
+            max_devices = 10
+        elif product_type == 'enterprise':
+            days_valid = 365 * 3
+            max_devices = 99
+        elif product_type == 'professional':
+            days_valid = 365
+            max_devices = 5
+        
+        # 准备激活数据
+        activation_data = {
+            "email": email,
+            "product_type": product_type,
+            "days_valid": days_valid,
+            "generated_at": datetime.now().isoformat(),
+            "valid_until": (datetime.now() + timedelta(days=days_valid)).isoformat(),
+            "max_devices": max_devices,
+            "purchase_id": purchase_id,
+            "product_name": product_name,
+            "version": "2.0"
+        }
+        
+        # 生成校验码
+        checksum = hashlib.md5(
+            f"{email}:{product_type}:{days_valid}:{purchase_id}".encode()
+        ).hexdigest()[:8]
+        activation_data['checksum'] = checksum
+        
+        # 加密
+        data_str = json.dumps(activation_data, separators=(',', ':'))
+        encrypted = cipher.encrypt(data_str.encode())
+        
+        # Base64编码
+        activation_code = base64.urlsafe_b64encode(encrypted).decode()
+        
+        # 格式化为易读格式 (8位一组)
+        formatted_code = '-'.join([
+            activation_code[i:i+8] 
+            for i in range(0, min(len(activation_code), 48), 8)
+        ])
+        
+        # 确保不超过59字符
+        if len(formatted_code) > 59:
+            formatted_code = formatted_code[:59]
+        
+        logger.info(f"🔐 生成专业激活码: {formatted_code[:20]}...")
+        return formatted_code, activation_data
+        
+    except Exception as e:
+        logger.error(f"❌ 生成专业激活码失败: {e}")
+        # 降级到简单激活码
+        return generate_simple_activation_code(email, product_type)
+# ==================== 新增结束 ====================
+
 def generate_simple_activation_code(email, product_type="personal"):
     """生成简单的激活码"""
     import secrets
@@ -121,7 +237,12 @@ def generate_simple_activation_code(email, product_type="personal"):
     random_part = secrets.token_hex(6).upper()
     
     # 产品类型代码
-    type_codes = {'personal': 'P', 'business': 'B', 'enterprise': 'E'}
+    type_codes = {
+        'personal': 'P', 
+        'professional': 'R',
+        'business': 'B', 
+        'enterprise': 'E'
+    }
     type_code = type_codes.get(product_type, 'P')
     
     # 邮箱哈希
@@ -135,10 +256,16 @@ def generate_simple_activation_code(email, product_type="personal"):
     
     # 计算有效期
     days_valid = 365
-    if product_type == 'business':
+    max_devices = 3
+    
+    if product_type == 'professional':
+        max_devices = 5
+    elif product_type == 'business':
         days_valid = 365 * 2
+        max_devices = 10
     elif product_type == 'enterprise':
         days_valid = 365 * 3
+        max_devices = 99
     
     # 激活数据
     activation_data = {
@@ -146,12 +273,179 @@ def generate_simple_activation_code(email, product_type="personal"):
         "product_type": product_type,
         "generated_at": datetime.now().isoformat(),
         "valid_until": (datetime.now() + timedelta(days=days_valid)).isoformat(),
-        "max_devices": 3 if product_type == "personal" else 10,
+        "max_devices": max_devices,
         "days_valid": days_valid,
         "activation_code": activation_code
     }
     
     return activation_code, activation_data
+
+# ==================== 新增：发送激活邮件函数 ====================
+def send_activation_email(email, activation_code, activation_data):
+    """发送激活邮件"""
+    
+    # 检查邮件配置
+    if not all([config.SMTP_HOST, config.SMTP_USER, config.SMTP_PASSWORD]):
+        logger.error("❌ 邮件服务未配置，无法发送激活邮件")
+        logger.info(f"📧 [模拟发送] 激活邮件到: {email}")
+        logger.info(f"   🔑 激活码: {activation_code}")
+        logger.info(f"   📅 有效期至: {activation_data.get('valid_until', 'N/A')}")
+        return False
+    
+    try:
+        # 从激活数据中提取信息
+        product_type = activation_data.get('product_type', 'personal').capitalize()
+        valid_until = activation_data.get('valid_until', '')[:10]
+        max_devices = activation_data.get('max_devices', 3)
+        product_name = activation_data.get('product_name', 'PDF Fusion Pro')
+        
+        # 创建邮件
+        msg = MIMEMultipart('alternative')
+        
+        # 邮件头
+        subject = f"🎉 您的 {product_name} {product_type} 版激活码"
+        msg['Subject'] = subject
+        msg['From'] = f"PDF Fusion Pro Team <{config.SMTP_USER}>"
+        msg['To'] = email
+        msg['Date'] = formatdate(localtime=True)
+        
+        # HTML 邮件内容
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>{product_name} 激活码</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; color: white; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ background: white; padding: 30px; border-radius: 0 0 10px 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+                .code {{ background: #f8f9fa; border: 2px dashed #667eea; padding: 20px; text-align: center; font-family: monospace; font-size: 18px; letter-spacing: 2px; margin: 20px 0; border-radius: 5px; word-break: break-all; }}
+                .info {{ background: #e7f3ff; border-left: 4px solid #1890ff; padding: 15px; margin: 20px 0; }}
+                .warning {{ background: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 5px; margin: 20px 0; }}
+                .footer {{ text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; color: #666; font-size: 12px; }}
+                table {{ width: 100%; border-collapse: collapse; }}
+                td {{ padding: 8px 0; border-bottom: 1px solid #eee; }}
+                td:first-child {{ font-weight: bold; width: 100px; color: #555; }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1 style="margin: 0; font-size: 28px;">🎉 感谢您购买 {product_name}！</h1>
+                <p style="margin: 10px 0 0 0; opacity: 0.9;">您的 {product_type} 版激活信息</p>
+            </div>
+            
+            <div class="content">
+                <h2 style="color: #2c3e50; margin-top: 0;">📋 激活信息</h2>
+                
+                <table>
+                    <tr>
+                        <td>邮箱地址</td>
+                        <td>{email}</td>
+                    </tr>
+                    <tr>
+                        <td>产品版本</td>
+                        <td>{product_type} 版</td>
+                    </tr>
+                    <tr>
+                        <td>有效期至</td>
+                        <td>{valid_until}</td>
+                    </tr>
+                    <tr>
+                        <td>支持设备</td>
+                        <td>{max_devices} 台</td>
+                    </tr>
+                </table>
+                
+                <h3 style="color: #2c3e50; margin-top: 30px;">🔑 您的激活码</h3>
+                <div class="code">
+                    {activation_code}
+                </div>
+                <p style="text-align: center; color: #666; font-size: 14px;">
+                    请复制此激活码，在软件激活窗口中粘贴使用
+                </p>
+                
+                <div class="info">
+                    <h4 style="margin-top: 0; color: #1890ff;">🚀 激活步骤</h4>
+                    <ol>
+                        <li>下载并安装 {product_name}</li>
+                        <li>运行软件，点击"激活"按钮</li>
+                        <li>粘贴上面的激活码</li>
+                        <li>点击"激活"完成注册</li>
+                    </ol>
+                </div>
+                
+                <div class="warning">
+                    <h4 style="margin-top: 0; color: #856404;">⚠️ 重要提醒</h4>
+                    <ul style="margin: 10px 0; padding-left: 20px;">
+                        <li>每个激活码最多可在 <strong>{max_devices} 台设备</strong> 同时使用</li>
+                        <li>请妥善保管此激活码，一旦丢失无法找回</li>
+                        <li>如需更换设备，请先在原设备注销</li>
+                        <li>技术支持邮箱：support@example.com</li>
+                    </ul>
+                </div>
+            </div>
+            
+            <div class="footer">
+                <p>© {datetime.now().year} {product_name}. 版权所有。</p>
+                <p>此邮件为系统自动发送，请勿直接回复。</p>
+            </div>
+        </body>
+        </html>
+        """
+        
+        # 纯文本内容（备用）
+        text_content = f"""
+感谢您购买 {product_name}！
+
+您的激活信息：
+邮箱地址：{email}
+产品版本：{product_type}版
+有效期至：{valid_until}
+支持设备：{max_devices}台
+
+您的激活码：{activation_code}
+
+激活步骤：
+1. 下载并安装 {product_name}
+2. 运行软件，点击"激活"按钮
+3. 粘贴上面的激活码
+4. 点击"激活"完成注册
+
+重要提醒：
+• 每个激活码最多可在 {max_devices} 台设备同时使用
+• 请妥善保管此激活码，一旦丢失无法找回
+• 如需更换设备，请先在原设备注销
+• 技术支持邮箱：support@example.com
+
+© {datetime.now().year} {product_name}. 版权所有。
+此邮件为系统自动发送，请勿直接回复。
+        """
+        
+        # 添加文本和HTML版本
+        msg.attach(MIMEText(text_content, 'plain'))
+        msg.attach(MIMEText(html_content, 'html'))
+        
+        # 连接SMTP服务器并发送
+        logger.info(f"📤 正在发送邮件到: {email}")
+        
+        with smtplib.SMTP(config.SMTP_HOST, int(config.SMTP_PORT)) as server:
+            server.starttls()  # 启用安全连接
+            server.login(config.SMTP_USER, config.SMTP_PASSWORD)
+            server.send_message(msg)
+        
+        logger.info(f"✅ 激活邮件已成功发送到: {email}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ 发送邮件失败: {e}")
+        # 记录模拟发送信息以便调试
+        logger.info(f"📧 [失败模拟] 激活邮件到: {email}")
+        logger.info(f"   🔑 激活码: {activation_code}")
+        logger.info(f"   📅 有效期至: {activation_data.get('valid_until', 'N/A')}")
+        return False
+# ==================== 新增结束 ====================
 
 def save_activation_record(email, activation_code, activation_data):
     """保存激活记录到数据库或文件"""
@@ -248,6 +542,8 @@ def home():
         "status": "运行中",
         "timestamp": datetime.now().isoformat(),
         "storage": storage_type,
+        "email_configured": smtp_configured,
+        "encryption_configured": cipher is not None,
         "endpoints": {
             "health": "/health",
             "generate": "/api/generate",
@@ -271,10 +567,17 @@ def health_check():
             except:
                 db_status = "连接失败"
         
+        # 邮件服务状态
+        email_status = "未配置"
+        if smtp_configured:
+            email_status = "已配置"
+        
         return jsonify({
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
             "database": db_status,
+            "email_service": email_status,
+            "encryption": "已启用" if cipher else "未启用",
             "version": "2.0.0"
         })
         
@@ -370,6 +673,7 @@ def api_verify():
         logger.error(f"验证激活码失败: {e}")
         return jsonify({"error": "服务器错误"}), 500
 
+# ==================== 修改后的Webhook处理函数 ====================
 @app.route('/api/webhook/gumroad', methods=['POST'])
 def webhook_gumroad():
     """处理Gumroad Webhook"""
@@ -379,8 +683,10 @@ def webhook_gumroad():
         # 获取基本信息
         email = data.get('email', '')
         product_name = data.get('product_name', '')
+        purchase_id = data.get('id', '')
         
         if not email:
+            logger.error("❌ Webhook数据中缺少邮箱地址")
             return jsonify({"error": "邮箱地址缺失"}), 400
         
         logger.info(f"📨 收到Gumroad购买: {email} - {product_name}")
@@ -393,49 +699,72 @@ def webhook_gumroad():
             product_type = 'business'
         elif 'enterprise' in product_name_lower:
             product_type = 'enterprise'
+        elif 'professional' in product_name_lower:
+            product_type = 'professional'
         
-        # 生成激活码
-        activation_code, activation_data = generate_simple_activation_code(email, product_type)
+        # ==================== 关键修改开始 ====================
+        # 生成专业的激活码（使用Fernet加密）
+        activation_code, activation_data = generate_professional_activation_code(
+            email=email,
+            product_type=product_type,
+            purchase_id=purchase_id,
+            product_name=product_name
+        )
         
-        # 保存购买记录
+        # 在激活数据中添加产品名称
+        activation_data['product_name'] = product_name
+        
+        # 保存购买记录（可选）
         try:
-            import psycopg2
-            conn = psycopg2.connect(config.DATABASE_URL)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-            INSERT INTO purchases (purchase_id, email, product_name, gumroad_data)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (purchase_id) DO NOTHING
-            ''', (
-                data.get('id', ''),
-                email,
-                product_name,
-                json.dumps(data)
-            ))
-            
-            conn.commit()
-            conn.close()
-            
+            if config.DATABASE_URL:
+                import psycopg2
+                conn = psycopg2.connect(config.DATABASE_URL)
+                cursor = conn.cursor()
+                
+                cursor.execute('''
+                INSERT INTO purchases (purchase_id, email, product_name, gumroad_data, processed, processed_at)
+                VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (purchase_id) DO NOTHING
+                ''', (
+                    purchase_id,
+                    email,
+                    product_name,
+                    json.dumps(data),
+                    True
+                ))
+                
+                conn.commit()
+                conn.close()
+                
         except Exception as db_error:
             logger.warning(f"保存购买记录失败: {db_error}")
             # 继续处理，不影响主要功能
         
         # 保存激活码
-        save_activation_record(email, activation_code, activation_data)
+        save_success = save_activation_record(email, activation_code, activation_data)
         
-        logger.info(f"✅ Webhook处理完成: {email} -> {activation_code}")
+        # 发送激活邮件（这是最关键的一步！）
+        email_sent = False
+        if activation_code:
+            email_sent = send_activation_email(email, activation_code, activation_data)
+        # ==================== 关键修改结束 ====================
+        
+        logger.info(f"✅ Webhook处理完成: {email} -> {activation_code[:20]}...")
+        logger.info(f"   邮件发送状态: {'成功' if email_sent else '失败'}")
+        logger.info(f"   激活码保存状态: {'成功' if save_success else '失败'}")
         
         return jsonify({
             "success": True,
-            "message": "激活码已生成",
+            "message": "激活码已生成" + ("并发送" if email_sent else "（但邮件发送失败）"),
             "activation_code": activation_code,
             "email": email,
-            "product_type": product_type
+            "product_type": product_type,
+            "email_sent": email_sent,
+            "save_success": save_success
         })
         
     except Exception as e:
-        logger.error(f"Webhook处理失败: {e}")
+        logger.error(f"❌ Webhook处理失败: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/admin/activations', methods=['GET'])
@@ -518,8 +847,11 @@ if __name__ == '__main__':
     logger.info(f"🚀 启动 PDF Fusion Pro 激活服务器")
     logger.info(f"📅 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"🔑 管理员密钥: {config.ADMIN_API_KEY[:8]}...")
+    logger.info(f"🔐 加密组件: {'已启用' if cipher else '未启用'}")
+    logger.info(f"📧 邮件服务: {'已配置' if smtp_configured else '未配置'}")
     logger.info(f"💾 存储方式: {'数据库' if database_initialized else '文件'}")
     logger.info(f"🌐 服务端口: {port}")
+    logger.info(f"🔗 Webhook地址: http://0.0.0.0:{port}/api/webhook/gumroad")
     logger.info("=" * 60)
     
     # 运行应用
