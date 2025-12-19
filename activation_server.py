@@ -1,6 +1,8 @@
+
+
 """
 PDF Fusion Pro - 激活服务器
-主服务器文件
+主服务器文件 - 支持 Gumroad Webhook
 """
 
 import os
@@ -14,13 +16,11 @@ from functools import wraps
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formatdate
+from urllib.parse import parse_qs, unquote
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-
-# ==================== 新增导入 ====================
 from cryptography.fernet import Fernet
-# ==================== 新增导入结束 ====================
 
 # 配置日志
 logging.basicConfig(
@@ -74,7 +74,6 @@ class Config:
 # 初始化配置
 config = Config()
 
-# ==================== 新增：专业组件初始化 ====================
 def init_professional_components():
     """初始化专业组件"""
     try:
@@ -112,9 +111,6 @@ def init_professional_components():
 
 # 初始化专业组件
 cipher, smtp_configured = init_professional_components()
-# ==================== 新增结束 ====================
-
-# ==================== 数据库初始化 ====================
 
 def safe_init_database():
     """
@@ -161,7 +157,29 @@ def require_api_key(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# ==================== 新增：专业激活码生成函数 ====================
+def parse_form_data(data):
+    """解析 form-urlencoded 数据"""
+    try:
+        # 解析查询字符串
+        parsed = parse_qs(data, keep_blank_values=True)
+        
+        # 将列表值转换为单个值，并解码 URL 编码
+        result = {}
+        for key, value in parsed.items():
+            if isinstance(value, list):
+                if len(value) == 1:
+                    # 解码 URL 编码
+                    result[key] = unquote(value[0])
+                else:
+                    result[key] = [unquote(v) for v in value]
+            else:
+                result[key] = unquote(value)
+        
+        return result
+    except Exception as e:
+        logger.error(f"解析 form-data 失败: {e}")
+        return {}
+
 def generate_professional_activation_code(email, product_type="personal", 
                                          purchase_id="", product_name=""):
     """生成专业的激活码（使用Fernet加密）"""
@@ -227,7 +245,6 @@ def generate_professional_activation_code(email, product_type="personal",
         logger.error(f"❌ 生成专业激活码失败: {e}")
         # 降级到简单激活码
         return generate_simple_activation_code(email, product_type)
-# ==================== 新增结束 ====================
 
 def generate_simple_activation_code(email, product_type="personal"):
     """生成简单的激活码"""
@@ -280,7 +297,6 @@ def generate_simple_activation_code(email, product_type="personal"):
     
     return activation_code, activation_data
 
-# ==================== 新增：发送激活邮件函数 ====================
 def send_activation_email(email, activation_code, activation_data):
     """发送激活邮件"""
     
@@ -445,7 +461,6 @@ def send_activation_email(email, activation_code, activation_data):
         logger.info(f"   🔑 激活码: {activation_code}")
         logger.info(f"   📅 有效期至: {activation_data.get('valid_until', 'N/A')}")
         return False
-# ==================== 新增结束 ====================
 
 def save_activation_record(email, activation_code, activation_data):
     """保存激活记录到数据库或文件"""
@@ -549,7 +564,8 @@ def home():
             "generate": "/api/generate",
             "verify": "/api/verify",
             "webhook": "/api/webhook/gumroad",
-            "manual_activate": "/api/manual-activate"  # 新增手动激活端点
+            "manual_activate": "/api/manual-activate",
+            "debug_webhook": "/api/debug/webhook"
         }
     })
 
@@ -674,85 +690,70 @@ def api_verify():
         logger.error(f"验证激活码失败: {e}")
         return jsonify({"error": "服务器错误"}), 500
 
-# ==================== 修改后的Webhook处理函数 ====================
+# ==================== 核心修复：Gumroad Webhook 处理 ====================
 @app.route('/api/webhook/gumroad', methods=['POST'])
 def webhook_gumroad():
-    """处理Gumroad Webhook"""
+    """处理Gumroad Webhook - 支持 form-urlencoded 格式"""
     try:
-        # ==================== 新增：详细调试日志 ====================
         logger.info("=" * 60)
-        logger.info("📨 🎯 收到 Webhook 请求")
-        logger.info(f"📋 请求头: {dict(request.headers)}")
-        logger.info(f"🌐 客户端IP: {request.remote_addr}")
+        logger.info("📨 🎯 收到 Gumroad Webhook 请求")
+        logger.info(f"📋 Content-Type: {request.content_type}")
         logger.info(f"📤 用户代理: {request.user_agent}")
-        logger.info(f"📝 方法: {request.method}")
-        logger.info(f"🔗 路径: {request.path}")
         
         # 获取原始数据
         raw_data = request.get_data(as_text=True)
         logger.info(f"📄 原始数据长度: {len(raw_data)} 字符")
-        logger.info(f"📄 原始数据: {raw_data[:500]}...")
-        # ==================== 调试日志结束 ====================
         
-        data = request.json
+        # 解析数据
+        data = {}
+        
+        if request.content_type == 'application/x-www-form-urlencoded':
+            logger.info("🔄 解析 form-urlencoded 格式")
+            data = parse_form_data(raw_data)
+        elif request.content_type == 'application/json':
+            logger.info("🔄 解析 JSON 格式")
+            data = request.json
+        else:
+            # 尝试自动检测
+            try:
+                data = request.json
+                logger.info("✅ 自动解析为 JSON")
+            except:
+                try:
+                    data = parse_form_data(raw_data)
+                    logger.info("✅ 自动解析为 form-urlencoded")
+                except Exception as e:
+                    logger.error(f"❌ 无法解析数据: {e}")
+                    return jsonify({
+                        "error": f"无法解析请求数据，Content-Type: {request.content_type}",
+                        "supported_types": ["application/json", "application/x-www-form-urlencoded"]
+                    }), 400
         
         if not data:
-            logger.error("❌ 无法解析 JSON 数据")
-            return jsonify({"error": "无法解析 JSON 数据"}), 400
+            logger.error("❌ 解析后数据为空")
+            return jsonify({"error": "无法解析请求数据"}), 400
         
-        # ==================== 新增：数据字段检查 ====================
-        logger.info(f"📊 解析的 JSON 字段: {list(data.keys())}")
-        logger.info(f"📊 JSON 数据内容: {json.dumps(data, ensure_ascii=False)[:500]}...")
-        # ==================== 数据检查结束 ====================
+        # 日志数据内容
+        logger.info(f"📊 解析后的数据字段: {list(data.keys())}")
         
-        # ==================== 修复：提取邮箱地址 ====================
-        email = None
+        # 提取关键信息
+        email = data.get('email')
+        product_name = data.get('product_name', 'PDF Fusion Pro')
+        sale_id = data.get('sale_id')
+        order_number = data.get('order_number')
         
-        # 尝试多种可能的邮箱字段
-        possible_email_fields = [
-            'email', 
-            'purchaser_email',
-            'buyer_email',
-            'customer_email'
-        ]
+        logger.info(f"🔍 关键信息:")
+        logger.info(f"   📧 Email: {email}")
+        logger.info(f"   📦 Product: {product_name}")
+        logger.info(f"   🆔 Sale ID: {sale_id}")
+        logger.info(f"   🧾 Order: {order_number}")
         
-        for field in possible_email_fields:
-            if field in data and data[field]:
-                email = data[field]
-                logger.info(f"✅ 从字段 '{field}' 找到邮箱: {email}")
-                break
-        
+        # 验证必要字段
         if not email:
-            logger.error(f"❌ 未找到邮箱字段，可用字段: {list(data.keys())}")
-            logger.error(f"📊 完整数据: {json.dumps(data, indent=2, ensure_ascii=False)}")
-            return jsonify({"error": "邮箱地址缺失", "available_fields": list(data.keys())}), 400
+            logger.error("❌ 缺少邮箱地址")
+            return jsonify({"error": "邮箱地址缺失"}), 400
         
-        # ==================== 修复：提取产品信息 ====================
-        product_name = data.get('product_name', 'PDF Activation')
-        logger.info(f"📦 产品名称: {product_name}")
-        
-        # ==================== 修复：提取购买ID ====================
-        purchase_id = None
-        
-        # 尝试多种可能的购买ID字段
-        possible_purchase_id_fields = [
-            'purchase_id',
-            'id',
-            'order_id',
-            'sale_id'
-        ]
-        
-        for field in possible_purchase_id_fields:
-            if field in data and data[field]:
-                purchase_id = data[field]
-                logger.info(f"✅ 从字段 '{field}' 找到购买ID: {purchase_id}")
-                break
-        
-        if not purchase_id:
-            purchase_id = f"manual_{int(datetime.now().timestamp())}"
-            logger.warning(f"⚠️ 未找到购买ID，使用自动生成: {purchase_id}")
-        
-        # ==================== 修复：判断产品类型 ====================
+        # 确定产品类型
         product_name_lower = product_name.lower()
         product_type = 'personal'
         
@@ -765,9 +766,11 @@ def webhook_gumroad():
         
         logger.info(f"🏷️  产品类型: {product_type}")
         
-        # ==================== 关键：生成激活码 ====================
-        logger.info(f"🔑 开始生成激活码: {email} -> {product_type}")
+        # 使用 sale_id 作为购买ID
+        purchase_id = sale_id or order_number or f"gumroad_{int(datetime.now().timestamp())}"
         
+        # 生成激活码
+        logger.info(f"🔑 开始生成激活码...")
         activation_code, activation_data = generate_professional_activation_code(
             email=email,
             product_type=product_type,
@@ -775,57 +778,25 @@ def webhook_gumroad():
             product_name=product_name
         )
         
-        # 在激活数据中添加产品名称
-        activation_data['product_name'] = product_name
-        
         logger.info(f"✅ 激活码生成完成: {activation_code[:30]}...")
         
-        # ==================== 保存购买记录 ====================
-        try:
-            if config.DATABASE_URL:
-                import psycopg2
-                conn = psycopg2.connect(config.DATABASE_URL)
-                cursor = conn.cursor()
-                
-                cursor.execute('''
-                INSERT INTO purchases (purchase_id, email, product_name, gumroad_data, processed, processed_at)
-                VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-                ON CONFLICT (purchase_id) DO NOTHING
-                ''', (
-                    purchase_id,
-                    email,
-                    product_name,
-                    json.dumps(data),
-                    True
-                ))
-                
-                conn.commit()
-                conn.close()
-                logger.info(f"💾 购买记录保存成功: {purchase_id}")
-                
-        except Exception as db_error:
-            logger.warning(f"保存购买记录失败: {db_error}")
-            # 继续处理，不影响主要功能
-        
-        # ==================== 保存激活码 ====================
+        # 保存激活记录
         save_success = save_activation_record(email, activation_code, activation_data)
         
-        # ==================== 发送激活邮件 ====================
+        # 发送邮件
         email_sent = False
         if activation_code:
             logger.info(f"📤 准备发送邮件到: {email}")
             email_sent = send_activation_email(email, activation_code, activation_data)
-        else:
-            logger.error("❌ 激活码为空，无法发送邮件")
         
-        # ==================== 完成日志 ====================
+        # 记录处理结果
         logger.info("=" * 60)
-        logger.info(f"🎉 Webhook 处理完成总结:")
+        logger.info(f"🎉 Gumroad Webhook 处理完成")
         logger.info(f"   📧 邮箱: {email}")
-        logger.info(f"   🏷️  产品: {product_name} ({product_type})")
-        logger.info(f"   🔑 激活码: {activation_code}")
-        logger.info(f"   📤 邮件发送: {'✅ 成功' if email_sent else '❌ 失败'}")
-        logger.info(f"   💾 数据保存: {'✅ 成功' if save_success else '❌ 失败'}")
+        logger.info(f"   🏷️  产品: {product_name}")
+        logger.info(f"   🔑 激活码: {activation_code[:20]}...")
+        logger.info(f"   📤 邮件状态: {'✅ 已发送' if email_sent else '❌ 发送失败'}")
+        logger.info(f"   💾 保存状态: {'✅ 成功' if save_success else '❌ 失败'}")
         logger.info("=" * 60)
         
         return jsonify({
@@ -842,7 +813,43 @@ def webhook_gumroad():
         logger.error(f"❌ Webhook处理失败: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
-# ==================== 新增：手动激活端点 ====================
+@app.route('/api/debug/webhook', methods=['POST'])
+def debug_webhook():
+    """调试Webhook - 显示原始数据"""
+    try:
+        logger.info("=" * 60)
+        logger.info("🐛 调试 Webhook 请求")
+        logger.info(f"📋 请求头: {dict(request.headers)}")
+        
+        raw_data = request.get_data(as_text=True)
+        content_type = request.content_type
+        
+        result = {
+            "method": request.method,
+            "content_type": content_type,
+            "raw_data": raw_data,
+            "headers": dict(request.headers)
+        }
+        
+        # 尝试解析
+        if content_type == 'application/x-www-form-urlencoded':
+            result['parsed_data'] = parse_form_data(raw_data)
+        elif content_type == 'application/json':
+            try:
+                result['parsed_data'] = request.json
+            except:
+                result['parsed_data'] = "无法解析为JSON"
+        else:
+            result['parsed_data'] = "未知格式"
+        
+        logger.info(f"📊 解析结果: {json.dumps(result, indent=2, ensure_ascii=False)[:500]}...")
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"❌ 调试Webhook失败: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/manual-activate', methods=['POST'])
 def manual_activate():
     """手动触发激活（用于测试和调试）"""
@@ -910,13 +917,12 @@ def manual_activate():
             "purchase_id": purchase_id,
             "email_sent": email_sent,
             "save_success": save_success,
-            "note": "这是手动触发的激活，请确认Gumroad Webhook配置"
+            "note": "这是手动触发的激活"
         })
         
     except Exception as e:
         logger.error(f"❌ 手动激活失败: {e}")
         return jsonify({"error": str(e)}), 500
-# ==================== 新增结束 ====================
 
 @app.route('/api/admin/activations', methods=['GET'])
 @require_api_key
@@ -1003,7 +1009,6 @@ if __name__ == '__main__':
     logger.info(f"💾 存储方式: {'数据库' if database_initialized else '文件'}")
     logger.info(f"🌐 服务端口: {port}")
     logger.info(f"🔗 Webhook地址: http://0.0.0.0:{port}/api/webhook/gumroad")
-    logger.info(f"🔗 手动激活地址: http://0.0.0.0:{port}/api/manual-activate")
     logger.info("=" * 60)
     
     # 运行应用
