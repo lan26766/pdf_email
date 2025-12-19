@@ -2,8 +2,12 @@ services:
   - type: web
     name: pdf-activation-server
     runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn activation_server:app
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    startCommand: |
+      # 确保使用正确的端口绑定
+      gunicorn activation_server:app --bind 0.0.0.0:$PORT --timeout 120 --workers 2
     envVars:
       - key: ENCRYPTION_KEY
         generateValue: true
@@ -16,25 +20,29 @@ services:
       - key: SMTP_HOST
         value: smtp.gmail.com
       - key: SMTP_PORT
-        value: 587
+        value: "587"  # 注意：YAML中数字需要引号或保持原样
       - key: SMTP_USER
-        sync: false
+        sync: false  # 你需要在Render Dashboard中手动设置
       - key: SMTP_PASSWORD
-        sync: false
+        sync: false  # 你需要在Render Dashboard中手动设置
       - key: GUMROAD_WEBHOOK_SECRET
-        sync: false
+        sync: false  # 你需要在Render Dashboard中手动设置
       - key: DEBUG
-        value: false
+        value: "false"  # 字符串形式
     healthCheckPath: /health
     autoDeploy: true
-    disk:
-      name: data
-      mountPath: /data
-      sizeGB: 1
+    # 注意：免费计划不支持disk挂载，如果需要移除或升级计划
+    # disk:
+    #   name: data
+    #   mountPath: /data
+    #   sizeGB: 1
 
 databases:
   - name: pdf-activations-db
     plan: free
     databaseName: pdf_activations
-    user: pdf_admin.
-
+    user: pdf_admin
+    # 添加IP白名单允许所有连接（或者指定服务）
+    ipAllowList:
+      - source: 0.0.0.0/0
+        description: "Allow all for now"  # 生产环境应该更严格
