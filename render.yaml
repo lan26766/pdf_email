@@ -1,11 +1,9 @@
 services:
-  # 这是一个后台工作服务 (Background Worker)
-  # 它可以发起出站网络连接（如发送邮件）
-  - type: worker  # 关键修改：从 "web" 改为 "worker"
-    name: pdf-activation-worker  # 建议改名，明确这是工作服务
+  - type: web
+    name: pdf-activation-server
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn activation_server:app --bind 0.0.0.0:$PORT
+    startCommand: gunicorn activation_server:app
     envVars:
       - key: ENCRYPTION_KEY
         generateValue: true
@@ -38,4 +36,5 @@ databases:
   - name: pdf-activations-db
     plan: free
     databaseName: pdf_activations
-    user: pdf_admin
+    user: pdf_admin.
+
