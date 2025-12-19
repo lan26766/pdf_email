@@ -1,6 +1,6 @@
-flask>=2.3.0
-flask-cors>=4.0.0
-psycopg2-binary>=2.9.0
-cryptography>=38.0.0
-python-dotenv>=1.0.0
-gunicorn>=20.1.0
+Flask==3.1.2
+flask-cors==6.0.2
+psycopg2-binary==2.9.11
+cryptography==46.0.3
+python-dotenv==1.2.1
+gunicorn==23.0.0
