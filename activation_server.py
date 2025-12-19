@@ -20,7 +20,6 @@ from flask_cors import CORS
 
 # ==================== 新增导入 ====================
 from cryptography.fernet import Fernet
-
 # ==================== 新增导入结束 ====================
 
 # 配置日志
@@ -34,49 +33,46 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-
 # 配置类
 class Config:
     """应用配置"""
-
+    
     # 从环境变量读取
     ENCRYPTION_KEY = os.getenv('ENCRYPTION_KEY', '')
     ADMIN_API_KEY = os.getenv('ADMIN_API_KEY', '')
     DATABASE_URL = os.getenv('DATABASE_URL', '')
-
+    
     # 邮件配置（可选）
     SMTP_HOST = os.getenv('SMTP_HOST', '')
     SMTP_PORT = os.getenv('SMTP_PORT', '587')
     SMTP_USER = os.getenv('SMTP_USER', '')
     SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', '')
-
+    
     # Gumroad配置（可选）
     GUMROAD_WEBHOOK_SECRET = os.getenv('GUMROAD_WEBHOOK_SECRET', '')
-
+    
     @classmethod
     def validate(cls):
         """验证必要配置"""
         required = ['ENCRYPTION_KEY', 'ADMIN_API_KEY']
         missing = []
-
+        
         for var in required:
             if not getattr(cls, var):
                 missing.append(var)
-
+        
         if missing:
             logger.error(f"❌ 缺少必要配置: {', '.join(missing)}")
             return False
-
+        
         if not cls.DATABASE_URL:
             logger.warning("⚠️  未配置 DATABASE_URL，将使用本地文件存储")
-
+        
         logger.info("✅ 配置验证通过")
         return True
 
-
 # 初始化配置
 config = Config()
-
 
 # ==================== 新增：专业组件初始化 ====================
 def init_professional_components():
@@ -84,71 +80,38 @@ def init_professional_components():
     try:
         # 初始化激活码生成器
         encryption_key = config.ENCRYPTION_KEY
-        cipher = None
-
-        if encryption_key:
-            logger.info(f"🔑 使用配置的加密密钥: {encryption_key[:10]}...")
-            try:
-                # 确保密钥是32字节的base64编码
-                if len(encryption_key) < 32:
-                    logger.warning("⚠️  加密密钥太短，正在填充...")
-                    # 简单填充（生产环境应该使用更安全的方法）
-                    encryption_key = encryption_key.ljust(32, '0')[:32]
-
-                # 确保是base64编码
-                import base64
-                try:
-                    # 尝试解码验证
-                    base64.urlsafe_b64decode(encryption_key + '=' * (4 - len(encryption_key) % 4))
-                    cipher = Fernet(encryption_key)
-                    logger.info("✅ 加密组件初始化成功")
-                except (ValueError, TypeError):
-                    logger.warning("⚠️  加密密钥不是有效的base64，尝试转换...")
-                    # 转换为base64
-                    key_bytes = encryption_key.encode()[:32]
-                    if len(key_bytes) < 32:
-                        key_bytes = key_bytes.ljust(32, b'0')[:32]
-                    encryption_key = base64.urlsafe_b64encode(key_bytes).decode()
-                    cipher = Fernet(encryption_key)
-                    logger.info("✅ 加密组件初始化成功（自动转换密钥）")
-            except Exception as e:
-                logger.error(f"❌ 加密密钥处理失败: {e}")
-                cipher = None
-        else:
+        if not encryption_key:
+            # 生成一个固定的开发密钥（生产环境必须使用安全的随机密钥）
             logger.warning("⚠️  ENCRYPTION_KEY 未配置，使用开发密钥")
-            # 生成一个固定的开发密钥（仅用于开发测试）
-            try:
-                dev_key = "dev-key-for-testing-only-32bytes!!"
-                dev_key_b64 = base64.urlsafe_b64encode(dev_key.encode()).decode()
-                cipher = Fernet(dev_key_b64)
-                logger.info("✅ 使用开发加密密钥")
-            except Exception as e:
-                logger.error(f"❌ 开发密钥创建失败: {e}")
-                cipher = None
-
+            encryption_key = base64.urlsafe_b64encode(b'dev-key-32-bytes-for-testing-only!!')
+        
+        # 确保密钥是字符串
+        if isinstance(encryption_key, bytes):
+            encryption_key = encryption_key.decode('utf-8')
+        
+        cipher = Fernet(encryption_key)
+        logger.info("✅ 加密组件初始化完成")
+        
         # 初始化邮件发送器配置
         smtp_configured = all([
             config.SMTP_HOST,
             config.SMTP_USER,
             config.SMTP_PASSWORD
         ])
-
+        
         if smtp_configured:
             logger.info(f"✅ 邮件服务已配置: {config.SMTP_USER}")
         else:
             logger.warning("⚠️  邮件服务未完全配置，将无法发送激活邮件")
-
+        
         return cipher, smtp_configured
-
+        
     except Exception as e:
         logger.error(f"❌ 专业组件初始化失败: {e}")
         return None, False
 
-
 # 初始化专业组件
 cipher, smtp_configured = init_professional_components()
-
-
 # ==================== 新增结束 ====================
 
 # ==================== 数据库初始化 ====================
@@ -161,21 +124,21 @@ def safe_init_database():
     if not config.DATABASE_URL:
         logger.info("💾 使用本地文件存储（未配置数据库）")
         return False
-
+    
     try:
         # 尝试导入数据库模块
         from database.init_db import init_database
-
+        
         logger.info("🔗 正在连接数据库...")
         success = init_database(config.DATABASE_URL)
-
+        
         if success:
             logger.info("✅ 数据库初始化成功")
             return True
         else:
             logger.warning("⚠️  数据库初始化失败，降级到文件存储")
             return False
-
+            
     except ImportError as e:
         logger.warning(f"⚠️  无法导入数据库模块: {e}")
         logger.warning("💾 降级到本地文件存储")
@@ -185,12 +148,10 @@ def safe_init_database():
         logger.warning("💾 降级到本地文件存储")
         return False
 
-
 # ==================== 工具函数 ====================
 
 def require_api_key(f):
     """API密钥验证装饰器"""
-
     @wraps(f)
     def decorated_function(*args, **kwargs):
         api_key = request.headers.get('X-API-Key')
@@ -198,23 +159,21 @@ def require_api_key(f):
             logger.warning(f"未授权访问尝试: {request.remote_addr}")
             return jsonify({"error": "未授权"}), 401
         return f(*args, **kwargs)
-
     return decorated_function
 
-
 # ==================== 新增：专业激活码生成函数 ====================
-def generate_professional_activation_code(email, product_type="personal",
-                                          purchase_id="", product_name=""):
+def generate_professional_activation_code(email, product_type="personal", 
+                                         purchase_id="", product_name=""):
     """生成专业的激活码（使用Fernet加密）"""
     try:
         if not cipher:
             logger.warning("⚠️  加密组件未初始化，降级到简单激活码")
             return generate_simple_activation_code(email, product_type)
-
+        
         # 根据产品类型设置参数
         days_valid = 365
         max_devices = 3
-
+        
         if product_type == 'business':
             days_valid = 365 * 2
             max_devices = 10
@@ -224,7 +183,7 @@ def generate_professional_activation_code(email, product_type="personal",
         elif product_type == 'professional':
             days_valid = 365
             max_devices = 5
-
+        
         # 准备激活数据
         activation_data = {
             "email": email,
@@ -237,70 +196,68 @@ def generate_professional_activation_code(email, product_type="personal",
             "product_name": product_name,
             "version": "2.0"
         }
-
+        
         # 生成校验码
         checksum = hashlib.md5(
             f"{email}:{product_type}:{days_valid}:{purchase_id}".encode()
         ).hexdigest()[:8]
         activation_data['checksum'] = checksum
-
+        
         # 加密
         data_str = json.dumps(activation_data, separators=(',', ':'))
         encrypted = cipher.encrypt(data_str.encode())
-
+        
         # Base64编码
         activation_code = base64.urlsafe_b64encode(encrypted).decode()
-
+        
         # 格式化为易读格式 (8位一组)
         formatted_code = '-'.join([
-            activation_code[i:i + 8]
+            activation_code[i:i+8] 
             for i in range(0, min(len(activation_code), 48), 8)
         ])
-
+        
         # 确保不超过59字符
         if len(formatted_code) > 59:
             formatted_code = formatted_code[:59]
-
+        
         logger.info(f"🔐 生成专业激活码: {formatted_code[:20]}...")
         return formatted_code, activation_data
-
+        
     except Exception as e:
         logger.error(f"❌ 生成专业激活码失败: {e}")
         # 降级到简单激活码
         return generate_simple_activation_code(email, product_type)
-
-
 # ==================== 新增结束 ====================
 
 def generate_simple_activation_code(email, product_type="personal"):
     """生成简单的激活码"""
     import secrets
-
+    
     # 生成随机部分
     random_part = secrets.token_hex(6).upper()
-
+    
     # 产品类型代码
     type_codes = {
-        'personal': 'P',
+        'personal': 'P', 
         'professional': 'R',
-        'business': 'B',
+        'business': 'B', 
         'enterprise': 'E'
     }
     type_code = type_codes.get(product_type, 'P')
-
+    
     # 邮箱哈希
     email_hash = hashlib.md5(email.encode()).hexdigest()[:4].upper()
-
+    
     # 时间戳（月日）
     timestamp = datetime.now().strftime('%m%d')
-
+    
     # 组合激活码
     activation_code = f"PDF-{type_code}{timestamp}-{email_hash}-{random_part[:4]}-{random_part[4:8]}"
-
+    
     # 计算有效期
     days_valid = 365
     max_devices = 3
-
+    
     if product_type == 'professional':
         max_devices = 5
     elif product_type == 'business':
@@ -309,7 +266,7 @@ def generate_simple_activation_code(email, product_type="personal"):
     elif product_type == 'enterprise':
         days_valid = 365 * 3
         max_devices = 99
-
+    
     # 激活数据
     activation_data = {
         "email": email,
@@ -320,66 +277,38 @@ def generate_simple_activation_code(email, product_type="personal"):
         "days_valid": days_valid,
         "activation_code": activation_code
     }
-
+    
     return activation_code, activation_data
-
 
 # ==================== 新增：发送激活邮件函数 ====================
 def send_activation_email(email, activation_code, activation_data):
     """发送激活邮件"""
-
-    # ==================== 详细配置检查 ====================
-    logger.info(f"🔍 开始发送邮件到: {email}")
-    logger.info(f"   激活码: {activation_code}")
-    logger.info(f"   SMTP_HOST: {config.SMTP_HOST}")
-    logger.info(f"   SMTP_PORT: {config.SMTP_PORT}")
-    logger.info(f"   SMTP_USER: {config.SMTP_USER}")
-    logger.info(f"   SMTP_PASSWORD 长度: {len(config.SMTP_PASSWORD) if config.SMTP_PASSWORD else 0}")
-
+    
     # 检查邮件配置
-    required_configs = [
-        ('SMTP_HOST', config.SMTP_HOST),
-        ('SMTP_USER', config.SMTP_USER),
-        ('SMTP_PASSWORD', config.SMTP_PASSWORD)
-    ]
-
-    missing_configs = [name for name, value in required_configs if not value]
-    if missing_configs:
-        logger.error(f"❌ 邮件服务配置缺失: {', '.join(missing_configs)}")
+    if not all([config.SMTP_HOST, config.SMTP_USER, config.SMTP_PASSWORD]):
+        logger.error("❌ 邮件服务未配置，无法发送激活邮件")
         logger.info(f"📧 [模拟发送] 激活邮件到: {email}")
         logger.info(f"   🔑 激活码: {activation_code}")
         logger.info(f"   📅 有效期至: {activation_data.get('valid_until', 'N/A')}")
         return False
-
-    # 确保密码没有空格
-    if config.SMTP_PASSWORD and ' ' in config.SMTP_PASSWORD:
-        logger.warning("⚠️  SMTP_PASSWORD 中包含空格，尝试自动处理...")
-        original_password = config.SMTP_PASSWORD
-        cleaned_password = config.SMTP_PASSWORD.replace(' ', '')
-        logger.info(f"   原始密码: '{original_password}'")
-        logger.info(f"   清理后: '{cleaned_password}'")
-        # 使用清理后的密码
-        smtp_password = cleaned_password
-    else:
-        smtp_password = config.SMTP_PASSWORD
-
+    
     try:
         # 从激活数据中提取信息
         product_type = activation_data.get('product_type', 'personal').capitalize()
         valid_until = activation_data.get('valid_until', '')[:10]
         max_devices = activation_data.get('max_devices', 3)
         product_name = activation_data.get('product_name', 'PDF Fusion Pro')
-
+        
         # 创建邮件
         msg = MIMEMultipart('alternative')
-
+        
         # 邮件头
         subject = f"🎉 您的 {product_name} {product_type} 版激活码"
         msg['Subject'] = subject
         msg['From'] = f"PDF Fusion Pro Team <{config.SMTP_USER}>"
         msg['To'] = email
         msg['Date'] = formatdate(localtime=True)
-
+        
         # HTML 邮件内容
         html_content = f"""
         <!DOCTYPE html>
@@ -406,10 +335,10 @@ def send_activation_email(email, activation_code, activation_data):
                 <h1 style="margin: 0; font-size: 28px;">🎉 感谢您购买 {product_name}！</h1>
                 <p style="margin: 10px 0 0 0; opacity: 0.9;">您的 {product_type} 版激活信息</p>
             </div>
-
+            
             <div class="content">
                 <h2 style="color: #2c3e50; margin-top: 0;">📋 激活信息</h2>
-
+                
                 <table>
                     <tr>
                         <td>邮箱地址</td>
@@ -428,7 +357,7 @@ def send_activation_email(email, activation_code, activation_data):
                         <td>{max_devices} 台</td>
                     </tr>
                 </table>
-
+                
                 <h3 style="color: #2c3e50; margin-top: 30px;">🔑 您的激活码</h3>
                 <div class="code">
                     {activation_code}
@@ -436,7 +365,7 @@ def send_activation_email(email, activation_code, activation_data):
                 <p style="text-align: center; color: #666; font-size: 14px;">
                     请复制此激活码，在软件激活窗口中粘贴使用
                 </p>
-
+                
                 <div class="info">
                     <h4 style="margin-top: 0; color: #1890ff;">🚀 激活步骤</h4>
                     <ol>
@@ -446,7 +375,7 @@ def send_activation_email(email, activation_code, activation_data):
                         <li>点击"激活"完成注册</li>
                     </ol>
                 </div>
-
+                
                 <div class="warning">
                     <h4 style="margin-top: 0; color: #856404;">⚠️ 重要提醒</h4>
                     <ul style="margin: 10px 0; padding-left: 20px;">
@@ -457,7 +386,7 @@ def send_activation_email(email, activation_code, activation_data):
                     </ul>
                 </div>
             </div>
-
+            
             <div class="footer">
                 <p>© {datetime.now().year} {product_name}. 版权所有。</p>
                 <p>此邮件为系统自动发送，请勿直接回复。</p>
@@ -465,7 +394,7 @@ def send_activation_email(email, activation_code, activation_data):
         </body>
         </html>
         """
-
+        
         # 纯文本内容（备用）
         text_content = f"""
 感谢您购买 {product_name}！
@@ -493,76 +422,29 @@ def send_activation_email(email, activation_code, activation_data):
 © {datetime.now().year} {product_name}. 版权所有。
 此邮件为系统自动发送，请勿直接回复。
         """
-
+        
         # 添加文本和HTML版本
         msg.attach(MIMEText(text_content, 'plain'))
         msg.attach(MIMEText(html_content, 'html'))
-
+        
         # 连接SMTP服务器并发送
-        logger.info(f"📤 正在连接到 {config.SMTP_HOST}:{config.SMTP_PORT}...")
-
-        # ==================== 添加详细的SMTP调试 ====================
-        try:
-            # 测试连接
-            server = smtplib.SMTP(config.SMTP_HOST, int(config.SMTP_PORT), timeout=30)
-            logger.info(f"✅ 已连接到 {config.SMTP_HOST}:{config.SMTP_PORT}")
-
-            # 调试信息
-            logger.info("🔧 正在发送 EHLO...")
-            server.ehlo()
-            logger.info("✅ EHLO 成功")
-
-            logger.info("🔧 正在启动 TLS...")
-            server.starttls()
-            logger.info("✅ TLS 已启动")
-
-            server.ehlo()  # 重新发送 EHLO 在 TLS 之后
-
-            logger.info(f"🔧 正在登录账户 {config.SMTP_USER}...")
-            server.login(config.SMTP_USER, smtp_password)
-            logger.info("✅ 登录成功")
-
-            logger.info(f"📨 正在发送邮件到 {email}...")
+        logger.info(f"📤 正在发送邮件到: {email}")
+        
+        with smtplib.SMTP(config.SMTP_HOST, int(config.SMTP_PORT)) as server:
+            server.starttls()  # 启用安全连接
+            server.login(config.SMTP_USER, config.SMTP_PASSWORD)
             server.send_message(msg)
-            logger.info("✅ 邮件发送成功")
-
-            server.quit()
-            logger.info("✅ SMTP 连接已关闭")
-
-        except smtplib.SMTPAuthenticationError as auth_error:
-            logger.error(f"❌ SMTP认证失败: {auth_error}")
-            logger.error(f"   错误代码: {auth_error.smtp_code}")
-            logger.error(
-                f"   错误信息: {auth_error.smtp_error.decode() if hasattr(auth_error, 'smtp_error') else str(auth_error)}")
-            logger.error("   请检查：1.密码是否正确 2.是否使用了应用专用密码 3.邮箱是否正确")
-            return False
-
-        except smtplib.SMTPException as smtp_error:
-            logger.error(f"❌ SMTP协议错误: {smtp_error}")
-            return False
-
-        except TimeoutError:
-            logger.error(f"❌ 连接超时，无法连接到 {config.SMTP_HOST}:{config.SMTP_PORT}")
-            logger.error("   请检查：1.网络连接 2.防火墙设置 3.端口是否开放")
-            return False
-
-        except ConnectionRefusedError:
-            logger.error(f"❌ 连接被拒绝: {config.SMTP_HOST}:{config.SMTP_PORT}")
-            logger.error("   请检查：1.端口是否正确 2.服务是否可用")
-            return False
-
+        
         logger.info(f"✅ 激活邮件已成功发送到: {email}")
         return True
-
+        
     except Exception as e:
-        logger.error(f"❌ 发送邮件失败: {e}", exc_info=True)
+        logger.error(f"❌ 发送邮件失败: {e}")
         # 记录模拟发送信息以便调试
         logger.info(f"📧 [失败模拟] 激活邮件到: {email}")
         logger.info(f"   🔑 激活码: {activation_code}")
         logger.info(f"   📅 有效期至: {activation_data.get('valid_until', 'N/A')}")
         return False
-
-
 # ==================== 新增结束 ====================
 
 def save_activation_record(email, activation_code, activation_data):
@@ -579,16 +461,15 @@ def save_activation_record(email, activation_code, activation_data):
         # 尝试文件备份
         return save_to_file(email, activation_code, activation_data)
 
-
 def save_to_database(email, activation_code, activation_data):
     """保存到数据库"""
     try:
         import psycopg2
         import psycopg2.extras
-
+        
         conn = psycopg2.connect(config.DATABASE_URL)
         cursor = conn.cursor()
-
+        
         cursor.execute('''
         INSERT INTO activations 
         (email, activation_code, product_type, days_valid, max_devices, valid_until, metadata)
@@ -603,14 +484,14 @@ def save_to_database(email, activation_code, activation_data):
             activation_data['valid_until'],
             json.dumps(activation_data)
         ))
-
+        
         conn.commit()
         cursor.close()
         conn.close()
-
+        
         logger.info(f"💾 激活码保存到数据库: {activation_code[:20]}...")
         return True
-
+        
     except ImportError:
         logger.warning("未安装 psycopg2，降级到文件存储")
         return save_to_file(email, activation_code, activation_data)
@@ -618,21 +499,20 @@ def save_to_database(email, activation_code, activation_data):
         logger.error(f"数据库保存失败: {e}")
         return save_to_file(email, activation_code, activation_data)
 
-
 def save_to_file(email, activation_code, activation_data):
     """保存到本地文件"""
     try:
         import csv
         from datetime import datetime
-
+        
         filename = "activations.csv"
         file_exists = os.path.exists(filename)
-
+        
         with open(filename, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             if not file_exists:
                 writer.writerow(['时间', '邮箱', '激活码', '产品类型', '有效期至', '最大设备数'])
-
+            
             writer.writerow([
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 email,
@@ -641,14 +521,13 @@ def save_to_file(email, activation_code, activation_data):
                 activation_data['valid_until'][:10],
                 activation_data['max_devices']
             ])
-
+        
         logger.info(f"📄 激活码保存到文件: {activation_code}")
         return True
-
+        
     except Exception as e:
         logger.error(f"文件保存失败: {e}")
         return False
-
 
 # ==================== API 路由 ====================
 
@@ -656,7 +535,7 @@ def save_to_file(email, activation_code, activation_data):
 def home():
     """主页"""
     storage_type = "数据库" if config.DATABASE_URL else "文件"
-
+    
     return jsonify({
         "service": "PDF Fusion Pro 激活服务器",
         "version": "2.0.0",
@@ -670,10 +549,9 @@ def home():
             "generate": "/api/generate",
             "verify": "/api/verify",
             "webhook": "/api/webhook/gumroad",
-            "debug_test": "/api/debug/webhook-test"
+            "manual_activate": "/api/manual-activate"  # 新增手动激活端点
         }
     })
-
 
 @app.route('/health')
 def health_check():
@@ -689,37 +567,21 @@ def health_check():
                 db_status = "连接正常"
             except:
                 db_status = "连接失败"
-
+        
         # 邮件服务状态
         email_status = "未配置"
-        email_details = {}
-
-        if all([config.SMTP_HOST, config.SMTP_USER, config.SMTP_PASSWORD]):
+        if smtp_configured:
             email_status = "已配置"
-            email_details = {
-                "host": config.SMTP_HOST,
-                "port": config.SMTP_PORT,
-                "user": config.SMTP_USER[:3] + "..." if config.SMTP_USER else "未设置",
-                "password_configured": bool(config.SMTP_PASSWORD)
-            }
-
+        
         return jsonify({
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
             "database": db_status,
-            "email_service": {
-                "status": email_status,
-                "details": email_details
-            },
+            "email_service": email_status,
             "encryption": "已启用" if cipher else "未启用",
-            "version": "2.0.0",
-            "endpoints": {
-                "webhook": "/api/webhook/gumroad",
-                "debug_test": "/api/debug/webhook-test",
-                "health": "/health"
-            }
+            "version": "2.0.0"
         })
-
+        
     except Exception as e:
         return jsonify({
             "status": "unhealthy",
@@ -727,63 +589,61 @@ def health_check():
             "timestamp": datetime.now().isoformat()
         }), 500
 
-
 @app.route('/api/generate', methods=['POST'])
 @require_api_key
 def api_generate():
     """生成激活码"""
     try:
         data = request.json
-
+        
         # 验证输入
         email = data.get('email')
         if not email:
             return jsonify({"error": "邮箱地址是必需的"}), 400
-
+        
         product_type = data.get('product_type', 'personal')
         days = data.get('days', 365)
-
+        
         # 生成激活码
         activation_code, activation_data = generate_simple_activation_code(email, product_type)
-
+        
         # 保存记录
         save_activation_record(email, activation_code, activation_data)
-
+        
         logger.info(f"✅ 生成激活码: {email} -> {activation_code}")
-
+        
         return jsonify({
             "success": True,
             "message": "激活码生成成功",
             "activation_code": activation_code,
             "data": activation_data
         })
-
+        
     except Exception as e:
         logger.error(f"生成激活码失败: {e}")
         return jsonify({"error": "服务器错误"}), 500
-
 
 @app.route('/api/verify', methods=['POST'])
 def api_verify():
     """验证激活码"""
     try:
         data = request.json
-
+        
         # 验证输入
         activation_code = data.get('activation_code')
         device_id = data.get('device_id', 'unknown')
         device_name = data.get('device_name', 'Unknown Device')
-
+        
         if not activation_code:
             return jsonify({"error": "激活码是必需的"}), 400
-
+        
         # 基本格式验证
         if not activation_code.startswith("PDF-"):
             return jsonify({
                 "valid": False,
                 "message": "无效的激活码格式"
             })
-
+        
         # 提取产品类型
         product_type = 'personal'
         if len(activation_code) > 4:
@@ -792,12 +652,12 @@ def api_verify():
                 product_type = 'business'
             elif code_char == 'E':
                 product_type = 'enterprise'
-
+        
         # 模拟验证结果
         max_devices = 3 if product_type == "personal" else 10
-
+        
         logger.info(f"✅ 验证激活码: {activation_code} -> {device_id}")
-
+        
         return jsonify({
             "valid": True,
             "message": "激活成功",
@@ -809,125 +669,124 @@ def api_verify():
                 "device_name": device_name
             }
         })
-
+        
     except Exception as e:
         logger.error(f"验证激活码失败: {e}")
         return jsonify({"error": "服务器错误"}), 500
 
-
 # ==================== 修改后的Webhook处理函数 ====================
 @app.route('/api/webhook/gumroad', methods=['POST'])
 def webhook_gumroad():
-    """处理Gumroad Webhook - 增强兼容性"""
+    """处理Gumroad Webhook"""
     try:
-        # ==================== 增强的数据解析 ====================
-        # 方法1：尝试解析JSON数据
-        data = None
-        content_type = request.headers.get('Content-Type', '').lower()
-
-        logger.info(f"📨 收到Webhook请求，Content-Type: {content_type}")
-
-        # 记录原始请求体用于调试
-        raw_body = request.get_data(as_text=True)
-        logger.info(f"   原始请求体 (前500字符): {raw_body[:500]}")
-
-        if 'application/json' in content_type:
-            # 标准JSON格式
-            data = request.json
-            logger.info("✅ 以JSON格式解析数据")
-        elif 'application/x-www-form-urlencoded' in content_type:
-            # Form格式（Gumroad有时会发送这种格式）
-            form_data = request.form.to_dict()
-            logger.info(f"📋 以Form格式解析数据: {len(form_data)}个字段")
-
-            # 尝试解析form中的JSON
-            if 'payload' in form_data:
-                try:
-                    data = json.loads(form_data['payload'])
-                    logger.info("✅ 从form的payload字段解析JSON")
-                except json.JSONDecodeError:
-                    logger.warning("⚠️ form中的payload字段不是有效的JSON")
-                    data = form_data
-            else:
-                data = form_data
-        elif raw_body and raw_body.strip():
-            # 尝试直接解析请求体为JSON
-            try:
-                data = json.loads(raw_body)
-                logger.info("✅ 直接解析请求体为JSON")
-            except json.JSONDecodeError:
-                logger.warning("⚠️ 请求体不是有效的JSON，尝试解析为Form")
-                # 尝试解析为查询字符串
-                try:
-                    from urllib.parse import parse_qs
-                    parsed = parse_qs(raw_body)
-                    data = {k: v[0] if len(v) == 1 else v for k, v in parsed.items()}
-                    logger.info(f"📋 以查询字符串解析数据: {len(data)}个字段")
-                except Exception:
-                    logger.error("❌ 无法解析请求体格式")
-                    return jsonify({"error": "无法解析请求数据格式"}), 400
-        else:
-            logger.error("❌ 请求体为空或无法识别的格式")
-            return jsonify({"error": "请求体为空或格式不支持"}), 400
-
+        # ==================== 新增：详细调试日志 ====================
+        logger.info("=" * 60)
+        logger.info("📨 🎯 收到 Webhook 请求")
+        logger.info(f"📋 请求头: {dict(request.headers)}")
+        logger.info(f"🌐 客户端IP: {request.remote_addr}")
+        logger.info(f"📤 用户代理: {request.user_agent}")
+        logger.info(f"📝 方法: {request.method}")
+        logger.info(f"🔗 路径: {request.path}")
+        
+        # 获取原始数据
+        raw_data = request.get_data(as_text=True)
+        logger.info(f"📄 原始数据长度: {len(raw_data)} 字符")
+        logger.info(f"📄 原始数据: {raw_data[:500]}...")
+        # ==================== 调试日志结束 ====================
+        
+        data = request.json
+        
         if not data:
-            logger.error("❌ 解析后数据为空")
-            return jsonify({"error": "数据为空"}), 400
-
-        logger.info(f"📊 解析后的数据键: {list(data.keys())}")
-        # ==================== 数据解析结束 ====================
-
-        # 获取基本信息
-        email = data.get('email', '')
-        product_name = data.get('product_name', '')
-        purchase_id = data.get('id', '')
-
+            logger.error("❌ 无法解析 JSON 数据")
+            return jsonify({"error": "无法解析 JSON 数据"}), 400
+        
+        # ==================== 新增：数据字段检查 ====================
+        logger.info(f"📊 解析的 JSON 字段: {list(data.keys())}")
+        logger.info(f"📊 JSON 数据内容: {json.dumps(data, ensure_ascii=False)[:500]}...")
+        # ==================== 数据检查结束 ====================
+        
+        # ==================== 修复：提取邮箱地址 ====================
+        email = None
+        
+        # 尝试多种可能的邮箱字段
+        possible_email_fields = [
+            'email', 
+            'purchaser_email',
+            'buyer_email',
+            'customer_email'
+        ]
+        
+        for field in possible_email_fields:
+            if field in data and data[field]:
+                email = data[field]
+                logger.info(f"✅ 从字段 '{field}' 找到邮箱: {email}")
+                break
+        
         if not email:
-            # 尝试从其他字段获取邮箱
-            email = data.get('seller_email') or data.get('email_address') or ''
-            if not email:
-                logger.error("❌ Webhook数据中缺少邮箱地址")
-                return jsonify({"error": "邮箱地址缺失"}), 400
-
-        logger.info(f"📨 收到Gumroad购买: {email} - {product_name}")
-
-        # 判断产品类型
-        product_name_lower = (product_name or '').lower()
+            logger.error(f"❌ 未找到邮箱字段，可用字段: {list(data.keys())}")
+            logger.error(f"📊 完整数据: {json.dumps(data, indent=2, ensure_ascii=False)}")
+            return jsonify({"error": "邮箱地址缺失", "available_fields": list(data.keys())}), 400
+        
+        # ==================== 修复：提取产品信息 ====================
+        product_name = data.get('product_name', 'PDF Activation')
+        logger.info(f"📦 产品名称: {product_name}")
+        
+        # ==================== 修复：提取购买ID ====================
+        purchase_id = None
+        
+        # 尝试多种可能的购买ID字段
+        possible_purchase_id_fields = [
+            'purchase_id',
+            'id',
+            'order_id',
+            'sale_id'
+        ]
+        
+        for field in possible_purchase_id_fields:
+            if field in data and data[field]:
+                purchase_id = data[field]
+                logger.info(f"✅ 从字段 '{field}' 找到购买ID: {purchase_id}")
+                break
+        
+        if not purchase_id:
+            purchase_id = f"manual_{int(datetime.now().timestamp())}"
+            logger.warning(f"⚠️ 未找到购买ID，使用自动生成: {purchase_id}")
+        
+        # ==================== 修复：判断产品类型 ====================
+        product_name_lower = product_name.lower()
         product_type = 'personal'
-
+        
         if 'business' in product_name_lower:
             product_type = 'business'
         elif 'enterprise' in product_name_lower:
             product_type = 'enterprise'
         elif 'professional' in product_name_lower:
             product_type = 'professional'
-
-        # ==================== 生成激活码 ====================
-        # 即使专业组件初始化失败，也使用简单激活码
-        if cipher:
-            # 使用专业的激活码生成器
-            activation_code, activation_data = generate_professional_activation_code(
-                email=email,
-                product_type=product_type,
-                purchase_id=purchase_id,
-                product_name=product_name
-            )
-            logger.info(f"🔐 生成专业激活码: {activation_code[:30]}...")
-        else:
-            # 使用简单的激活码
-            activation_code, activation_data = generate_simple_activation_code(email, product_type)
-            logger.info(f"🔐 生成简单激活码: {activation_code}")
-
+        
+        logger.info(f"🏷️  产品类型: {product_type}")
+        
+        # ==================== 关键：生成激活码 ====================
+        logger.info(f"🔑 开始生成激活码: {email} -> {product_type}")
+        
+        activation_code, activation_data = generate_professional_activation_code(
+            email=email,
+            product_type=product_type,
+            purchase_id=purchase_id,
+            product_name=product_name
+        )
+        
         # 在激活数据中添加产品名称
         activation_data['product_name'] = product_name
-
-        # 保存购买记录（可选）
+        
+        logger.info(f"✅ 激活码生成完成: {activation_code[:30]}...")
+        
+        # ==================== 保存购买记录 ====================
         try:
             if config.DATABASE_URL:
                 import psycopg2
                 conn = psycopg2.connect(config.DATABASE_URL)
                 cursor = conn.cursor()
-
+                
                 cursor.execute('''
                 INSERT INTO purchases (purchase_id, email, product_name, gumroad_data, processed, processed_at)
                 VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
@@ -939,43 +798,37 @@ def webhook_gumroad():
                     json.dumps(data),
                     True
                 ))
-
+                
                 conn.commit()
                 conn.close()
-
+                logger.info(f"💾 购买记录保存成功: {purchase_id}")
+                
         except Exception as db_error:
             logger.warning(f"保存购买记录失败: {db_error}")
-
-        # 保存激活码
+            # 继续处理，不影响主要功能
+        
+        # ==================== 保存激活码 ====================
         save_success = save_activation_record(email, activation_code, activation_data)
-
-        # 发送激活邮件（这是最关键的一步！）
+        
+        # ==================== 发送激活邮件 ====================
         email_sent = False
-        email_error = None
         if activation_code:
-            try:
-                logger.info("=" * 50)
-                logger.info("📧 开始邮件发送流程...")
-                email_sent = send_activation_email(email, activation_code, activation_data)
-                if email_sent:
-                    logger.info("✅ 邮件发送流程完成：成功")
-                else:
-                    logger.warning("⚠️  邮件发送流程完成：失败")
-                logger.info("=" * 50)
-            except Exception as e:
-                email_error = str(e)
-                logger.error(f"❌ 邮件发送异常: {e}", exc_info=True)
+            logger.info(f"📤 准备发送邮件到: {email}")
+            email_sent = send_activation_email(email, activation_code, activation_data)
         else:
-            logger.error("❌ 无法发送邮件：激活码为空")
-
-        logger.info(f"✅ Webhook处理完成: {email} -> {activation_code[:20]}...")
-        logger.info(f"   邮件发送状态: {'成功' if email_sent else '失败'}")
-        logger.info(f"   激活码保存状态: {'成功' if save_success else '失败'}")
-        if email_error:
-            logger.info(f"   邮件错误: {email_error}")
-
-        # 返回成功响应给Gumroad
-        response_data = {
+            logger.error("❌ 激活码为空，无法发送邮件")
+        
+        # ==================== 完成日志 ====================
+        logger.info("=" * 60)
+        logger.info(f"🎉 Webhook 处理完成总结:")
+        logger.info(f"   📧 邮箱: {email}")
+        logger.info(f"   🏷️  产品: {product_name} ({product_type})")
+        logger.info(f"   🔑 激活码: {activation_code}")
+        logger.info(f"   📤 邮件发送: {'✅ 成功' if email_sent else '❌ 失败'}")
+        logger.info(f"   💾 数据保存: {'✅ 成功' if save_success else '❌ 失败'}")
+        logger.info("=" * 60)
+        
+        return jsonify({
             "success": True,
             "message": "激活码已生成" + ("并发送" if email_sent else "（但邮件发送失败）"),
             "activation_code": activation_code,
@@ -983,62 +836,86 @@ def webhook_gumroad():
             "product_type": product_type,
             "email_sent": email_sent,
             "save_success": save_success
-        }
-
-        # Gumroad期望200响应
-        return jsonify(response_data)
-
+        })
+        
     except Exception as e:
         logger.error(f"❌ Webhook处理失败: {e}", exc_info=True)
-        # 仍然返回200给Gumroad，避免Gumroad重试
+        return jsonify({"error": str(e)}), 500
+
+# ==================== 新增：手动激活端点 ====================
+@app.route('/api/manual-activate', methods=['POST'])
+def manual_activate():
+    """手动触发激活（用于测试和调试）"""
+    try:
+        logger.info("🛠️  收到手动激活请求")
+        
+        data = request.json
+        
+        # 验证必要字段
+        required_fields = ['email', 'product_name']
+        missing_fields = [field for field in required_fields if field not in data]
+        
+        if missing_fields:
+            return jsonify({
+                "error": f"缺少必要字段: {', '.join(missing_fields)}",
+                "required_fields": required_fields,
+                "received_fields": list(data.keys())
+            }), 400
+        
+        email = data['email']
+        product_name = data['product_name']
+        
+        # 使用提供的购买ID或生成一个
+        purchase_id = data.get('purchase_id', f"manual_{int(datetime.now().timestamp())}")
+        
+        # 判断产品类型
+        product_name_lower = product_name.lower()
+        product_type = 'personal'
+        
+        if 'business' in product_name_lower:
+            product_type = 'business'
+        elif 'enterprise' in product_name_lower:
+            product_type = 'enterprise'
+        elif 'professional' in product_name_lower:
+            product_type = 'professional'
+        
+        logger.info(f"🛠️  手动激活参数:")
+        logger.info(f"   📧 邮箱: {email}")
+        logger.info(f"   🏷️  产品: {product_name} ({product_type})")
+        logger.info(f"   🆔 购买ID: {purchase_id}")
+        
+        # 生成激活码
+        activation_code, activation_data = generate_professional_activation_code(
+            email=email,
+            product_type=product_type,
+            purchase_id=purchase_id,
+            product_name=product_name
+        )
+        
+        # 保存激活码
+        save_success = save_activation_record(email, activation_code, activation_data)
+        
+        # 发送邮件
+        email_sent = False
+        if activation_code:
+            email_sent = send_activation_email(email, activation_code, activation_data)
+        
         return jsonify({
-            "success": False,
-            "error": str(e)[:100]
+            "success": True,
+            "message": "手动激活成功",
+            "activation_code": activation_code,
+            "email": email,
+            "product_name": product_name,
+            "product_type": product_type,
+            "purchase_id": purchase_id,
+            "email_sent": email_sent,
+            "save_success": save_success,
+            "note": "这是手动触发的激活，请确认Gumroad Webhook配置"
         })
-
-
-# ==================== 新增：调试端点 ====================
-@app.route('/api/debug/webhook-test', methods=['GET', 'POST'])
-def debug_webhook_test():
-    """调试Webhook兼容性"""
-    if request.method == 'GET':
-        return jsonify({
-            "endpoint": "/api/webhook/gumroad",
-            "methods": ["POST"],
-            "content_types": ["application/json", "application/x-www-form-urlencoded"],
-            "test_url": "https://pdf-email-1.onrender.com/api/webhook/gumroad",
-            "health_check": "https://pdf-email-1.onrender.com/health"
-        })
-
-    # 如果是POST，模拟Gumroad Webhook
-    test_data = {
-        "id": "test_" + str(datetime.now().timestamp()),
-        "email": "test@example.com",
-        "product_name": "PDF Fusion Pro Personal",
-        "price": 1249,
-        "currency": "USD",
-        "created_at": datetime.now().isoformat()
-    }
-
-    # 模拟不同Content-Type
-    content_type = request.args.get('type', 'json')
-
-    if content_type == 'form':
-        # 模拟form格式
-        return jsonify({
-            "simulating": "application/x-www-form-urlencoded",
-            "payload": json.dumps(test_data),
-            "note": "Gumroad有时会以form格式发送，payload字段包含JSON"
-        })
-    else:
-        # 标准JSON格式
-        return jsonify({
-            "simulating": "application/json",
-            "data": test_data,
-            "note": "标准JSON格式"
-        })
-
-
+        
+    except Exception as e:
+        logger.error(f"❌ 手动激活失败: {e}")
+        return jsonify({"error": str(e)}), 500
 # ==================== 新增结束 ====================
 
 @app.route('/api/admin/activations', methods=['GET'])
@@ -1047,53 +924,52 @@ def list_activations():
     """列出激活码"""
     try:
         activations = []
-
+        
         if config.DATABASE_URL:
             # 从数据库读取
             try:
                 import psycopg2
                 import psycopg2.extras
-
+                
                 conn = psycopg2.connect(config.DATABASE_URL)
                 cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
+                
                 cursor.execute('''
                 SELECT email, activation_code, product_type, generated_at 
                 FROM activations 
                 ORDER BY generated_at DESC 
                 LIMIT 50
                 ''')
-
+                
                 activations = cursor.fetchall()
                 conn.close()
-
+                
             except Exception as db_error:
                 logger.error(f"数据库查询失败: {db_error}")
-
+        
         # 如果数据库为空或失败，尝试从文件读取
         if not activations:
             try:
                 import csv
                 filename = "activations.csv"
-
+                
                 if os.path.exists(filename):
                     with open(filename, 'r', encoding='utf-8') as f:
                         reader = csv.DictReader(f)
                         activations = list(reader)
             except Exception as file_error:
                 logger.error(f"文件读取失败: {file_error}")
-
+        
         return jsonify({
             "success": True,
             "count": len(activations),
             "activations": activations,
             "source": "database" if config.DATABASE_URL else "file"
         })
-
+        
     except Exception as e:
         logger.error(f"列出激活码失败: {e}")
         return jsonify({"error": str(e)}), 500
-
 
 # ==================== 错误处理 ====================
 
@@ -1101,17 +977,14 @@ def list_activations():
 def not_found(error):
     return jsonify({"error": "未找到请求的资源"}), 404
 
-
 @app.errorhandler(405)
 def method_not_allowed(error):
     return jsonify({"error": "方法不允许"}), 405
-
 
 @app.errorhandler(500)
 def internal_error(error):
     logger.error(f"服务器内部错误: {error}")
     return jsonify({"error": "服务器内部错误"}), 500
-
 
 # ==================== 启动应用 ====================
 
@@ -1120,7 +993,7 @@ database_initialized = safe_init_database()
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
-
+    
     logger.info("=" * 60)
     logger.info(f"🚀 启动 PDF Fusion Pro 激活服务器")
     logger.info(f"📅 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1130,7 +1003,8 @@ if __name__ == '__main__':
     logger.info(f"💾 存储方式: {'数据库' if database_initialized else '文件'}")
     logger.info(f"🌐 服务端口: {port}")
     logger.info(f"🔗 Webhook地址: http://0.0.0.0:{port}/api/webhook/gumroad")
+    logger.info(f"🔗 手动激活地址: http://0.0.0.0:{port}/api/manual-activate")
     logger.info("=" * 60)
-
+    
     # 运行应用
     app.run(host='0.0.0.0', port=port, debug=False)
