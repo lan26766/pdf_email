@@ -1078,11 +1078,11 @@ def api_verify():
             return jsonify({"error": "激活码是必需的"}), 400
         
         # 基本格式验证
-        if not activation_code.startswith("PDF-"):
-            return jsonify({
-                "valid": False,
-                "message": "无效的激活码格式"
-            })
+        #if not activation_code.startswith("PDF-"):
+        #    return jsonify({
+        #        "valid": False,
+        #        "message": "无效的激活码格式"
+        #    })
         
         # 提取产品类型
         product_type = 'personal'
@@ -1279,3 +1279,4 @@ if __name__ == '__main__':
     
     # 运行应用
     app.run(host='0.0.0.0', port=port, debug=False)
+
