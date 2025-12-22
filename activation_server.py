@@ -416,7 +416,7 @@ def send_activation_email(email, activation_code, activation_data):
                         <li>Each activation code can be used on up to <strong>{max_devices} devices</strong> simultaneously</li>
                         <li>Please keep this activation code safe, it cannot be recovered if lost</li>
                         <li>If you need to change devices, please deactivate from the original device first</li>
-                        <li>Technical support email: support@example.com</li>
+                        <li>Technical support email: getpdffusion7300@gmail.com</li>
                     </ul>
                 </div>
             </div>
@@ -1280,5 +1280,6 @@ if __name__ == '__main__':
     
     # 运行应用
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
 
