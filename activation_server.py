@@ -316,41 +316,41 @@ def generate_simple_activation_code(email, product_type="personal"):
     return activation_code, activation_data
 
 def send_activation_email(email, activation_code, activation_data):
-    """发送激活邮件"""
+    """Send activation email"""
     
-    # 检查邮件配置
+    # Check email configuration
     if not all([config.SMTP_HOST, config.SMTP_USER, config.SMTP_PASSWORD]):
-        logger.error("❌ 邮件服务未配置，无法发送激活邮件")
-        logger.info(f"📧 [模拟发送] 激活邮件到: {email}")
-        logger.info(f"   🔑 激活码: {activation_code}")
-        logger.info(f"   📅 有效期至: {activation_data.get('valid_until', 'N/A')}")
+        logger.error("❌ Email service not configured, cannot send activation email")
+        logger.info(f"📧 [Simulated] Activation email to: {email}")
+        logger.info(f"   🔑 Activation code: {activation_code}")
+        logger.info(f"   📅 Valid until: {activation_data.get('valid_until', 'N/A')}")
         return False
     
     try:
-        # 从激活数据中提取信息
+        # Extract information from activation data
         product_type = activation_data.get('product_type', 'personal').capitalize()
         valid_until = activation_data.get('valid_until', '')[:10]
         max_devices = activation_data.get('max_devices', 3)
         product_name = activation_data.get('product_name', 'PDF Fusion Pro')
         
-        # 创建邮件
+        # Create email
         msg = MIMEMultipart('alternative')
         
-        # 邮件头
-        subject = f"🎉 您的 {product_name} {product_type} 版激活码"
+        # Email headers
+        subject = f"🎉 Your {product_name} {product_type} Edition Activation Code"
         msg['Subject'] = subject
         msg['From'] = f"PDF Fusion Pro Team <{config.SMTP_USER}>"
         msg['To'] = email
         msg['Date'] = formatdate(localtime=True)
         
-        # HTML 邮件内容
+        # HTML email content
         html_content = f"""
         <!DOCTYPE html>
         <html>
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>{product_name} 激活码</title>
+            <title>{product_name} Activation Code</title>
             <style>
                 body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }}
                 .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; color: white; text-align: center; border-radius: 10px 10px 0 0; }}
@@ -366,117 +366,118 @@ def send_activation_email(email, activation_code, activation_data):
         </head>
         <body>
             <div class="header">
-                <h1 style="margin: 0; font-size: 28px;">🎉 感谢您购买 {product_name}！</h1>
-                <p style="margin: 10px 0 0 0; opacity: 0.9;">您的 {product_type} 版激活信息</p>
+                <h1 style="margin: 0; font-size: 28px;">🎉 Thank you for purchasing {product_name}!</h1>
+                <p style="margin: 10px 0 0 0; opacity: 0.9;">Your {product_type} Edition Activation Information</p>
             </div>
             
             <div class="content">
-                <h2 style="color: #2c3e50; margin-top: 0;">📋 激活信息</h2>
+                <h2 style="color: #2c3e50; margin-top: 0;">📋 Activation Information</h2>
                 
                 <table>
                     <tr>
-                        <td>邮箱地址</td>
+                        <td>Email Address</td>
                         <td>{email}</td>
                     </tr>
                     <tr>
-                        <td>产品版本</td>
-                        <td>{product_type} 版</td>
+                        <td>Product Edition</td>
+                        <td>{product_type} Edition</td>
                     </tr>
                     <tr>
-                        <td>有效期至</td>
+                        <td>Valid Until</td>
                         <td>{valid_until}</td>
                     </tr>
                     <tr>
-                        <td>支持设备</td>
-                        <td>{max_devices} 台</td>
+                        <td>Supported Devices</td>
+                        <td>{max_devices} devices</td>
                     </tr>
                 </table>
                 
-                <h3 style="color: #2c3e50; margin-top: 30px;">🔑 您的激活码</h3>
+                <h3 style="color: #2c3e50; margin-top: 30px;">🔑 Your Activation Code</h3>
                 <div class="code">
                     {activation_code}
                 </div>
                 <p style="text-align: center; color: #666; font-size: 14px;">
-                    请复制此激活码，在软件激活窗口中粘贴使用
+                    Please copy this activation code and paste it in the software activation window
                 </p>
                 
                 <div class="info">
-                    <h4 style="margin-top: 0; color: #1890ff;">🚀 激活步骤</h4>
+                    <h4 style="margin-top: 0; color: #1890ff;">🚀 Activation Steps</h4>
                     <ol>
-                        <li>下载并安装 {product_name}</li>
-                        <li>运行软件，点击"激活"按钮</li>
-                        <li>粘贴上面的激活码</li>
-                        <li>点击"激活"完成注册</li>
+                        <li>Download and install {product_name}</li>
+                        <li>Run the software, click the "Activate" button</li>
+                        <li>Paste the activation code above</li>
+                        <li>Click "Activate" to complete registration</li>
                     </ol>
                 </div>
                 
                 <div class="warning">
-                    <h4 style="margin-top: 0; color: #856404;">⚠️ 重要提醒</h4>
+                    <h4 style="margin-top: 0; color: #856404;">⚠️ Important Reminders</h4>
                     <ul style="margin: 10px 0; padding-left: 20px;">
-                        <li>每个激活码最多可在 <strong>{max_devices} 台设备</strong> 同时使用</li>
-                        <li>请妥善保管此激活码，一旦丢失无法找回</li>
-                        <li>如需更换设备，请先在原设备注销</li>
-                        <li>技术支持邮箱：support@example.com</li>
+                        <li>Each activation code can be used on up to <strong>{max_devices} devices</strong> simultaneously</li>
+                        <li>Please keep this activation code safe, it cannot be recovered if lost</li>
+                        <li>If you need to change devices, please deactivate from the original device first</li>
+                        <li>Technical support email: support@example.com</li>
                     </ul>
                 </div>
             </div>
             
             <div class="footer">
-                <p>© {datetime.now().year} {product_name}. 版权所有。</p>
-                <p>此邮件为系统自动发送，请勿直接回复。</p>
+                <p>© {datetime.now().year} {product_name}. All rights reserved.</p>
+                <p>This email is automatically sent, please do not reply directly.</p>
             </div>
         </body>
         </html>
         """
         
-        # 纯文本内容（备用）
+        # Plain text content (fallback)
         text_content = f"""
-感谢您购买 {product_name}！
+Thank you for purchasing {product_name}!
 
-您的激活信息：
-邮箱地址：{email}
-产品版本：{product_type}版
-有效期至：{valid_until}
-支持设备：{max_devices}台
+Your activation information:
+Email Address: {email}
+Product Edition: {product_type} Edition
+Valid Until: {valid_until}
+Supported Devices: {max_devices} devices
 
-您的激活码：{activation_code}
+Your activation code: {activation_code}
 
-激活步骤：
-1. 下载并安装 {product_name}
-2. 运行软件，点击"激活"按钮
-3. 粘贴上面的激活码
-4. 点击"激活"完成注册
+Activation Steps:
+1. Download and install {product_name}
+2. Run the software, click the "Activate" button
+3. Paste the activation code above
+4. Click "Activate" to complete registration
 
-重要提醒：
-• 每个激活码最多可在 {max_devices} 台设备同时使用
-• 请妥善保管此激活码，一旦丢失无法找回
-• 如需更换设备，请先在原设备注销
-• 技术支持邮箱：support@example.com
+Important Reminders:
+• Each activation code can be used on up to {max_devices} devices simultaneously
+• Please keep this activation code safe, it cannot be recovered if lost
+• If you need to change devices, please deactivate from the original device first
+• Technical support email: support@example.com
 
-© {datetime.now().year} {product_name}. 版权所有。
-此邮件为系统自动发送，请勿直接回复。
+© {datetime.now().year} {product_name}. All rights reserved.
+This email is automatically sent, please do not reply directly.
         """
         
-        # 添加文本和HTML版本
+        # Add text and HTML versions
         msg.attach(MIMEText(text_content, 'plain'))
         msg.attach(MIMEText(html_content, 'html'))
         
-        # 连接SMTP服务器并发送
-        logger.info(f"📤 正在发送邮件到: {email}")
+        # Connect to SMTP server and send
+        logger.info(f"📤 Sending email to: {email}")
         
         with smtplib.SMTP(config.SMTP_HOST, int(config.SMTP_PORT)) as server:
-            server.starttls()  # 启用安全连接
+            server.starttls()  # Enable secure connection
             server.login(config.SMTP_USER, config.SMTP_PASSWORD)
             server.send_message(msg)
         
-        logger.info(f"✅ 激活邮件已成功发送到: {email}")
+        logger.info(f"✅ Activation email successfully sent to: {email}")
         return True
         
     except Exception as e:
-        logger.error(f"❌ 发送邮件失败: {e}")
-        logger.info(f"📧 [失败模拟] 激活邮件到: {email}")
-        logger.info(f"   🔑 激活码: {activation_code}")
-        logger.info(f"   📅 有效期至: {activation_data.get('valid_until', 'N/A')}")
+        logger.error(f"❌ Failed to send email: {e}")
+        # Log simulated sending information for debugging
+        logger.info(f"📧 [Failed Simulation] Activation email to: {email}")
+        logger.info(f"   🔑 Activation code: {activation_code}")
+        logger.info(f"   📅 Valid until: {activation_data.get('valid_until', 'N/A')}")
         return False
 
 def save_activation_record(email, activation_code, activation_data):
@@ -1279,4 +1280,5 @@ if __name__ == '__main__':
     
     # 运行应用
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
