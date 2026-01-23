@@ -18,6 +18,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formatdate
 from urllib.parse import parse_qs, unquote
+from concurrent.futures import ThreadPoolExecutor
 
 # 导入 python-dotenv 来读取 .env 文件
 from dotenv import load_dotenv
@@ -28,6 +29,9 @@ load_dotenv()
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from cryptography.fernet import Fernet
+
+# 创建线程池，用于处理耗时的激活验证操作
+thread_pool = ThreadPoolExecutor(max_workers=4)
 
 # 配置日志
 logging.basicConfig(
@@ -1152,6 +1156,56 @@ def verify_from_file(activation_code, device_id, device_name):
                             elif product_type == 'enterprise':
                                 max_devices = 99
                             
+                            # 检查设备激活数量限制
+                            # 使用device_activations.csv文件记录设备激活信息
+                            import os
+                            device_filename = os.path.join(os.path.dirname(__file__), "device_activations.csv")
+                            
+                            # 读取现有设备激活记录
+                            device_activations = []
+                            if os.path.exists(device_filename):
+                                try:
+                                    with open(device_filename, 'r', encoding='utf-8') as f:
+                                        device_reader = csv.DictReader(f)
+                                        for device_row in device_reader:
+                                            if device_row.get('激活码') == activation_code_clean:
+                                                device_activations.append(device_row)
+                                except Exception as e:
+                                    logger.error(f"读取设备激活记录失败: {e}")
+                            
+                            logger.info(f"设备激活数量: {len(device_activations)}/{max_devices}")
+                            
+                            # 检查设备是否已激活
+                            device_already_activated = False
+                            for device_row in device_activations:
+                                if device_row.get('设备ID') == device_id:
+                                    device_already_activated = True
+                                    logger.info(f"设备已激活: {device_id}")
+                                    break
+                            
+                            # 检查设备数量是否超过限制
+                            if not device_already_activated and len(device_activations) >= max_devices:
+                                logger.warning(f"设备数量已达上限: {len(device_activations)}/{max_devices}")
+                                return False, f"已达到最大设备数限制 ({max_devices} 台)", {}
+                            
+                            # 保存设备激活记录
+                            if not device_already_activated:
+                                try:
+                                    device_file_exists = os.path.exists(device_filename)
+                                    with open(device_filename, 'a', newline='', encoding='utf-8') as f:
+                                        device_writer = csv.writer(f)
+                                        if not device_file_exists:
+                                            device_writer.writerow(['时间', '激活码', '设备ID', '设备名称'])
+                                        device_writer.writerow([
+                                            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                            activation_code_clean,
+                                            device_id,
+                                            device_name
+                                        ])
+                                    logger.info(f"设备激活记录已添加: {device_id}")
+                                except Exception as e:
+                                    logger.error(f"保存设备激活记录失败: {e}")
+                            
                             # 激活数据
                             activation_data = {
                                 "product_type": product_type,
@@ -1742,11 +1796,32 @@ def api_generate():
         logger.error(f"生成激活码失败: {e}")
         return jsonify({"error": "服务器错误"}), 500
 
+# 激活验证函数，用于在线程池中执行
+def perform_activation_verification(activation_code, code_clean, device_id, device_name):
+    """执行激活码验证逻辑"""
+    try:
+        if config.DATABASE_URL and database_initialized:
+            # 从数据库验证
+            valid, message, activation_data = verify_from_database(code_clean, device_id, device_name)
+            
+            # 如果数据库验证失败，回退到文件验证
+            if not valid:
+                logger.warning(f"数据库验证失败，回退到文件验证: {message}")
+                valid, message, activation_data = verify_from_file(code_clean, device_id, device_name)
+        else:
+            # 从文件验证
+            valid, message, activation_data = verify_from_file(code_clean, device_id, device_name)
+        
+        return valid, message, activation_data
+    except Exception as e:
+        logger.error(f"激活验证失败: {e}")
+        return False, f"验证失败: {str(e)}", {}
+
 @rate_limit('verify')
 @validate_request(['application/json'])
 @app.route('/api/verify', methods=['POST'])
 def api_verify():
-    """验证激活码"""
+    """验证激活码（异步处理）"""
     try:
         data = request.json
         
@@ -1761,18 +1836,14 @@ def api_verify():
         # 清理激活码格式（统一转换为小写，与保存时格式一致）
         code_clean = activation_code.replace('-', '').replace(' ', '').lower()
         
-        # 验证激活码
-        if config.DATABASE_URL and database_initialized:
-            # 从数据库验证
-            valid, message, activation_data = verify_from_database(code_clean, device_id, device_name)
-            
-            # 如果数据库验证失败，回退到文件验证
-            if not valid:
-                logger.warning(f"数据库验证失败，回退到文件验证: {message}")
-                valid, message, activation_data = verify_from_file(code_clean, device_id, device_name)
-        else:
-            # 从文件验证
-            valid, message, activation_data = verify_from_file(code_clean, device_id, device_name)
+        # 使用线程池执行激活验证，避免阻塞主线程
+        future = thread_pool.submit(
+            perform_activation_verification,
+            activation_code, code_clean, device_id, device_name
+        )
+        
+        # 等待验证结果（设置超时时间，避免无限等待）
+        valid, message, activation_data = future.result(timeout=10)  # 10秒超时
         
         if not valid:
             logger.warning(f"❌ 激活码验证失败: {activation_code} -> {message}")
@@ -1791,6 +1862,13 @@ def api_verify():
             "data": activation_data
         })
         
+    except TimeoutError:
+        logger.error(f"❌ 激活验证超时: {activation_code}")
+        return jsonify({
+            "valid": False,
+            "message": "激活验证超时，请稍后重试",
+            "data": {}
+        })
     except Exception as e:
         logger.error(f"验证激活码失败: {e}")
         return jsonify({"error": "服务器错误"}), 500
@@ -1833,26 +1911,23 @@ def api_trial():
         logger.error(f"处理试用期请求失败: {e}")
         return jsonify({"success": False, "error": "服务器错误"}), 500
 
-@rate_limit('default')
-@validate_request(['application/json'])
-@app.route('/api/manual-activate', methods=['POST'])
-def manual_activate():
-    """手动触发激活（用于测试和调试）"""
+# 手动激活函数，用于在线程池中执行
+def perform_manual_activation(data):
+    """执行手动激活逻辑"""
     try:
         logger.info("🛠️  收到手动激活请求")
-        
-        data = request.json
         
         # 验证必要字段
         required_fields = ['email', 'product_name']
         missing_fields = [field for field in required_fields if field not in data]
         
         if missing_fields:
-            return jsonify({
+            return {
+                "success": False,
                 "error": f"缺少必要字段: {', '.join(missing_fields)}",
                 "required_fields": required_fields,
                 "received_fields": list(data.keys())
-            }), 400
+            }, 400
         
         email = data['email']
         product_name = data['product_name']
@@ -1887,12 +1962,24 @@ def manual_activate():
         # 保存激活码
         save_success = save_activation_record(email, activation_code, activation_data)
         
-        # 发送邮件
+        # 发送邮件（独立线程，不阻塞主线程）
         email_sent = False
         if activation_code:
-            email_sent = send_activation_email(email, activation_code, activation_data)
+            try:
+                # 在单独的线程中发送邮件，不阻塞激活码返回
+                def send_email_async():
+                    try:
+                        send_activation_email(email, activation_code, activation_data)
+                    except Exception as e:
+                        logger.error(f"异步发送邮件失败: {e}")
+                
+                email_thread = threading.Thread(target=send_email_async, daemon=True)
+                email_thread.start()
+                email_sent = True  # 标记为已发送请求，实际发送结果不影响激活码返回
+            except Exception as e:
+                logger.error(f"启动邮件发送线程失败: {e}")
         
-        return jsonify({
+        return {
             "success": True,
             "message": "手动激活成功",
             "activation_code": activation_code,
@@ -1903,10 +1990,36 @@ def manual_activate():
             "email_sent": email_sent,
             "save_success": save_success,
             "note": "这是手动触发的激活"
-        })
+        }, 200
         
     except Exception as e:
         logger.error(f"❌ 手动激活失败: {e}")
+        return {"error": str(e)}, 500
+
+@rate_limit('default')
+@validate_request(['application/json'])
+@app.route('/api/manual-activate', methods=['POST'])
+def manual_activate():
+    """手动触发激活（异步处理）"""
+    try:
+        data = request.json
+        
+        # 使用线程池执行手动激活，避免阻塞主线程
+        future = thread_pool.submit(perform_manual_activation, data)
+        
+        # 等待结果（设置超时时间）
+        result, status_code = future.result(timeout=15)  # 15秒超时
+        
+        return jsonify(result), status_code
+        
+    except TimeoutError:
+        logger.error(f"❌ 手动激活超时")
+        return jsonify({
+            "success": False,
+            "error": "手动激活超时，请稍后重试"
+        }), 504
+    except Exception as e:
+        logger.error(f"❌ 手动激活请求处理失败: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/admin/activations', methods=['GET'])
