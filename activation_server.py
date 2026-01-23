@@ -1064,57 +1064,121 @@ def verify_from_database(activation_code, device_id, device_name):
 def verify_from_file(activation_code, device_id, device_name):
     """从文件验证激活码"""
     try:
-        filename = "activations.csv"
+        # 使用绝对路径确保文件能被找到
+        import os
+        filename = os.path.join(os.path.dirname(__file__), "activations.csv")
+        
+        logger.info(f"验证文件路径: {filename}")
+        logger.info(f"文件存在: {os.path.exists(filename)}")
         
         if not os.path.exists(filename):
+            logger.error(f"❌ 激活码文件不存在: {filename}")
             return False, "激活码数据库不存在", {}
+        
+        # 检查文件权限
+        if not os.access(filename, os.R_OK):
+            logger.error(f"❌ 无法读取激活码文件: {filename}")
+            return False, "无法读取激活码数据库", {}
         
         # 清理激活码格式
         activation_code_clean = activation_code.replace('-', '').replace(' ', '')
+        logger.info(f"验证激活码 (清理后): {activation_code_clean}")
         
         import csv
         
-        with open(filename, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                # 清理文件中激活码的格式
-                row_code = row['激活码']
-                row_code_clean = row_code.replace('-', '').replace(' ', '')
-                
-                # 精确比较清理后的激活码
-                if row_code_clean == activation_code_clean:
-                    # 检查有效期
-                    valid_until = datetime.fromisoformat(row['有效期至'])
-                    if datetime.now() > valid_until:
-                        return False, "激活码已过期", {}
-                    
-                    # 计算剩余天数
-                    days_remaining = (valid_until - datetime.now()).days
-                    
-                    # 假设最大设备数为3
-                    max_devices = 3
-                    if row['产品类型'] == 'business':
-                        max_devices = 10
-                    elif row['产品类型'] == 'enterprise':
-                        max_devices = 99
-                    
-                    # 激活数据
-                    activation_data = {
-                        "product_type": row['产品类型'],
-                        "max_devices": max_devices,
-                        "valid_until": valid_until.isoformat(),
-                        "device_id": device_id,
-                        "device_name": device_name,
-                        "days_remaining": days_remaining,
-                        "email": row['邮箱']
-                    }
-                    
-                    return True, "激活成功", activation_data
+        # 尝试使用不同的编码读取文件
+        encodings = ['utf-8', 'utf-8-sig', 'gbk', 'gb2312']
+        reader = None
         
+        for encoding in encodings:
+            try:
+                logger.info(f"尝试使用编码读取文件: {encoding}")
+                with open(filename, 'r', encoding=encoding) as f:
+                    reader = csv.DictReader(f)
+                    # 测试读取第一行
+                    header = reader.fieldnames
+                    logger.info(f"文件头: {header}")
+                break
+            except Exception as e:
+                logger.warning(f"编码 {encoding} 读取失败: {e}")
+                continue
+        
+        if not reader:
+            logger.error("❌ 无法读取激活码文件，所有编码尝试失败")
+            return False, "无法读取激活码数据库", {}
+        
+        # 重新打开文件进行验证
+        for encoding in encodings:
+            try:
+                with open(filename, 'r', encoding=encoding) as f:
+                    reader = csv.DictReader(f)
+                    
+                    for row in reader:
+                        logger.info(f"读取到激活码记录: {row.get('激活码', '未知')[:30]}...")
+                        
+                        # 清理文件中激活码的格式
+                        row_code = row.get('激活码', '')
+                        row_code_clean = row_code.replace('-', '').replace(' ', '')
+                        
+                        logger.info(f"文件中激活码 (清理后): {row_code_clean}")
+                        logger.info(f"比较结果: {row_code_clean} == {activation_code_clean} → {row_code_clean == activation_code_clean}")
+                        
+                        # 精确比较清理后的激活码
+                        if row_code_clean == activation_code_clean:
+                            # 检查有效期
+                            valid_until_str = row.get('有效期至', '')
+                            logger.info(f"有效期: {valid_until_str}")
+                            
+                            if not valid_until_str:
+                                logger.error("❌ 激活码记录缺少有效期")
+                                continue
+                            
+                            try:
+                                valid_until = datetime.fromisoformat(valid_until_str)
+                            except Exception as e:
+                                logger.error(f"❌ 有效期格式错误: {e}")
+                                continue
+                            
+                            if datetime.now() > valid_until:
+                                logger.warning(f"⚠️  激活码已过期: {valid_until}")
+                                return False, "激活码已过期", {}
+                            
+                            # 计算剩余天数
+                            days_remaining = (valid_until - datetime.now()).days
+                            
+                            # 假设最大设备数为3
+                            max_devices = 3
+                            product_type = row.get('产品类型', 'personal')
+                            if product_type == 'business':
+                                max_devices = 10
+                            elif product_type == 'enterprise':
+                                max_devices = 99
+                            
+                            # 激活数据
+                            activation_data = {
+                                "product_type": product_type,
+                                "max_devices": max_devices,
+                                "valid_until": valid_until.isoformat(),
+                                "device_id": device_id,
+                                "device_name": device_name,
+                                "days_remaining": days_remaining,
+                                "email": row.get('邮箱', '')
+                            }
+                            
+                            logger.info(f"✅ 激活码验证成功: {activation_code}")
+                            return True, "激活成功", activation_data
+                            
+            except Exception as e:
+                logger.warning(f"编码 {encoding} 处理失败: {e}")
+                continue
+        
+        logger.warning(f"❌ 激活码未找到: {activation_code}")
         return False, "激活码不存在", {}
         
     except Exception as e:
         logger.error(f"文件验证失败: {e}")
+        import traceback
+        logger.error(f"错误堆栈: {traceback.format_exc()}")
         return False, f"文件验证失败: {str(e)}", {}
 
 def save_to_file(email, activation_code, activation_data):
