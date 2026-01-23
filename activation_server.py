@@ -19,6 +19,12 @@ from email.mime.multipart import MIMEMultipart
 from email.utils import formatdate
 from urllib.parse import parse_qs, unquote
 
+# 导入 python-dotenv 来读取 .env 文件
+from dotenv import load_dotenv
+
+# 加载环境变量
+load_dotenv()
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from cryptography.fernet import Fernet
