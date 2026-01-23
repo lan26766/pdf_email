@@ -1070,7 +1070,7 @@ def verify_from_file(activation_code, device_id, device_name):
             return False, "激活码数据库不存在", {}
         
         # 清理激活码格式
-        activation_code = activation_code.replace('-', '').replace(' ', '')
+        activation_code_clean = activation_code.replace('-', '').replace(' ', '')
         
         import csv
         
@@ -1078,8 +1078,11 @@ def verify_from_file(activation_code, device_id, device_name):
             reader = csv.DictReader(f)
             for row in reader:
                 # 清理文件中激活码的格式
-                row_code = row['激活码'].replace('-', '').replace(' ', '')
-                if row_code == activation_code:
+                row_code = row['激活码']
+                row_code_clean = row_code.replace('-', '').replace(' ', '')
+                
+                # 精确比较清理后的激活码
+                if row_code_clean == activation_code_clean:
                     # 检查有效期
                     valid_until = datetime.fromisoformat(row['有效期至'])
                     if datetime.now() > valid_until:
@@ -1685,9 +1688,14 @@ def api_verify():
         code_clean = activation_code.replace('-', '').replace(' ', '')
         
         # 验证激活码
-        if config.DATABASE_URL:
+        if config.DATABASE_URL and database_initialized:
             # 从数据库验证
             valid, message, activation_data = verify_from_database(code_clean, device_id, device_name)
+            
+            # 如果数据库验证失败，回退到文件验证
+            if not valid:
+                logger.warning(f"数据库验证失败，回退到文件验证: {message}")
+                valid, message, activation_data = verify_from_file(code_clean, device_id, device_name)
         else:
             # 从文件验证
             valid, message, activation_data = verify_from_file(code_clean, device_id, device_name)
