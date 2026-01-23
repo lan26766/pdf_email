@@ -968,6 +968,9 @@ def verify_from_database(activation_code, device_id, device_name):
         import psycopg2
         import psycopg2.extras
         
+        # 清理激活码格式
+        activation_code = activation_code.replace('-', '').replace(' ', '')
+        
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
@@ -1066,12 +1069,17 @@ def verify_from_file(activation_code, device_id, device_name):
         if not os.path.exists(filename):
             return False, "激活码数据库不存在", {}
         
+        # 清理激活码格式
+        activation_code = activation_code.replace('-', '').replace(' ', '')
+        
         import csv
         
         with open(filename, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                if row['激活码'] == activation_code:
+                # 清理文件中激活码的格式
+                row_code = row['激活码'].replace('-', '').replace(' ', '')
+                if row_code == activation_code:
                     # 检查有效期
                     valid_until = datetime.fromisoformat(row['有效期至'])
                     if datetime.now() > valid_until:
@@ -1679,10 +1687,10 @@ def api_verify():
         # 验证激活码
         if config.DATABASE_URL:
             # 从数据库验证
-            valid, message, activation_data = verify_from_database(activation_code, device_id, device_name)
+            valid, message, activation_data = verify_from_database(code_clean, device_id, device_name)
         else:
             # 从文件验证
-            valid, message, activation_data = verify_from_file(activation_code, device_id, device_name)
+            valid, message, activation_data = verify_from_file(code_clean, device_id, device_name)
         
         if not valid:
             logger.warning(f"❌ 激活码验证失败: {activation_code} -> {message}")
