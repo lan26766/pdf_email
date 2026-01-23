@@ -52,6 +52,16 @@ class Config:
     # Gumroad配置
     GUMROAD_WEBHOOK_SECRET = os.getenv('GUMROAD_WEBHOOK_SECRET', '')
     
+    # 服务器配置
+    SERVER_PORT = os.getenv('PORT', '5000')
+    SERVER_TIMEOUT = int(os.getenv('SERVER_TIMEOUT', '30'))  # 服务器超时时间（秒）
+    REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '10'))  # 请求超时时间（秒）
+    DEBUG_MODE = os.getenv('DEBUG', 'False').lower() == 'true'
+    
+    # 缓存配置
+    CACHE_ENABLED = os.getenv('CACHE_ENABLED', 'True').lower() == 'true'
+    CACHE_TTL = int(os.getenv('CACHE_TTL', '3600'))  # 缓存有效期（秒）
+    
     @classmethod
     def validate(cls):
         """验证必要配置"""
@@ -72,6 +82,12 @@ class Config:
         logger.info("✅ 配置验证通过")
         return True
 
+# 导入数据库连接池
+from psycopg2 import pool
+
+# 数据库连接池
+db_pool = None
+
 # 初始化配置
 config = Config()
 
@@ -79,6 +95,254 @@ config = Config()
 app_start_time = time.time()
 last_webhook_time = None
 webhook_count = 0
+
+# 速率限制配置
+RATE_LIMITS = {
+    'default': {'limit': 60, 'window': 60},  # 每分钟60个请求
+    'verify': {'limit': 30, 'window': 60},    # 验证端点限制更严格
+    'webhook': {'limit': 10, 'window': 60},   # Webhook限制
+    'admin': {'limit': 100, 'window': 60}     # 管理端点宽松一些
+}
+
+# 存储请求记录
+request_store = {}
+request_store_lock = threading.Lock()
+
+# 内存缓存
+cache_store = {}
+cache_lock = threading.Lock()
+
+def get_cache(key):
+    """获取缓存"""
+    if not config.CACHE_ENABLED:
+        return None
+    
+    with cache_lock:
+        if key in cache_store:
+            cached_data = cache_store[key]
+            # 检查是否过期
+            if time.time() < cached_data['expires_at']:
+                logger.debug(f"缓存命中: {key}")
+                return cached_data['value']
+            else:
+                # 清理过期缓存
+                del cache_store[key]
+                logger.debug(f"缓存过期: {key}")
+                return None
+        return None
+
+def set_cache(key, value, ttl=None):
+    """设置缓存"""
+    if not config.CACHE_ENABLED:
+        return False
+    
+    with cache_lock:
+        ttl = ttl or config.CACHE_TTL
+        cache_store[key] = {
+            'value': value,
+            'expires_at': time.time() + ttl,
+            'created_at': time.time()
+        }
+        logger.debug(f"缓存设置: {key}, TTL: {ttl}s")
+        return True
+
+def clear_cache(key=None):
+    """清除缓存"""
+    if not config.CACHE_ENABLED:
+        return False
+    
+    with cache_lock:
+        if key:
+            if key in cache_store:
+                del cache_store[key]
+                logger.debug(f"缓存清除: {key}")
+                return True
+            return False
+        else:
+            # 清除所有缓存
+            cache_store.clear()
+            logger.debug("所有缓存已清除")
+            return True
+
+def cleanup_cache():
+    """清理过期缓存"""
+    if not config.CACHE_ENABLED:
+        return
+    
+    with cache_lock:
+        expired_keys = []
+        current_time = time.time()
+        
+        for key, cached_data in cache_store.items():
+            if current_time >= cached_data['expires_at']:
+                expired_keys.append(key)
+        
+        for key in expired_keys:
+            del cache_store[key]
+        
+        if expired_keys:
+            logger.debug(f"清理过期缓存: {len(expired_keys)} 个")
+
+# 日志统计数据
+request_stats = {
+    'total_requests': 0,
+    'endpoint_stats': {},
+    'status_code_stats': {},
+    'method_stats': {},
+    'total_response_time': 0,
+    'max_response_time': 0,
+    'min_response_time': float('inf'),
+    'last_reset_time': time.time()
+}
+stats_lock = threading.Lock()
+
+def log_request(f):
+    """请求日志记录装饰器"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # 生成请求ID
+        import uuid
+        request_id = str(uuid.uuid4())
+        
+        # 记录请求开始时间
+        start_time = time.time()
+        
+        # 记录请求信息
+        client_ip = request.remote_addr
+        method = request.method
+        path = request.path
+        user_agent = request.headers.get('User-Agent', 'Unknown')
+        
+        # 记录请求参数
+        if request.method in ['POST', 'PUT', 'PATCH']:
+            try:
+                if request.is_json:
+                    request_data = request.json
+                else:
+                    request_data = dict(request.form)
+            except:
+                request_data = "无法解析"
+        else:
+            request_data = dict(request.args)
+        
+        logger.info(f"📥 请求开始 [{request_id}]: {method} {path} from {client_ip}")
+        logger.debug(f"请求参数: {request_data}")
+        logger.debug(f"User-Agent: {user_agent}")
+        
+        try:
+            # 执行请求处理
+            response = f(*args, **kwargs)
+            
+            # 记录响应信息
+            if isinstance(response, tuple):
+                response_data, status_code = response
+                if isinstance(response_data, dict):
+                    response_size = len(str(response_data))
+                else:
+                    response_size = len(response_data.get_data() if hasattr(response_data, 'get_data') else str(response_data))
+            else:
+                status_code = 200
+                response_size = len(response.get_data() if hasattr(response, 'get_data') else str(response))
+            
+            # 计算响应时间
+            response_time = time.time() - start_time
+            
+            # 更新统计数据
+            with stats_lock:
+                request_stats['total_requests'] += 1
+                request_stats['total_response_time'] += response_time
+                
+                if response_time > request_stats['max_response_time']:
+                    request_stats['max_response_time'] = response_time
+                if response_time < request_stats['min_response_time']:
+                    request_stats['min_response_time'] = response_time
+                
+                # 端点统计
+                if path not in request_stats['endpoint_stats']:
+                    request_stats['endpoint_stats'][path] = {
+                        'count': 0,
+                        'total_time': 0,
+                        'status_codes': {}
+                    }
+                request_stats['endpoint_stats'][path]['count'] += 1
+                request_stats['endpoint_stats'][path]['total_time'] += response_time
+                
+                # 状态码统计
+                if status_code not in request_stats['status_code_stats']:
+                    request_stats['status_code_stats'][status_code] = 0
+                request_stats['status_code_stats'][status_code] += 1
+                
+                # 端点状态码统计
+                if status_code not in request_stats['endpoint_stats'][path]['status_codes']:
+                    request_stats['endpoint_stats'][path]['status_codes'][status_code] = 0
+                request_stats['endpoint_stats'][path]['status_codes'][status_code] += 1
+                
+                # 方法统计
+                if method not in request_stats['method_stats']:
+                    request_stats['method_stats'][method] = 0
+                request_stats['method_stats'][method] += 1
+            
+            logger.info(f"📤 请求完成 [{request_id}]: {method} {path} -> {status_code} ({response_time:.3f}s, {response_size} bytes)")
+            
+            return response
+            
+        except Exception as e:
+            # 记录异常
+            response_time = time.time() - start_time
+            logger.error(f"❌ 请求失败 [{request_id}]: {method} {path} -> {str(e)} ({response_time:.3f}s)")
+            raise
+    
+    return decorated_function
+
+def get_request_stats():
+    """获取请求统计数据"""
+    with stats_lock:
+        stats_copy = request_stats.copy()
+        
+        # 计算平均响应时间
+        if stats_copy['total_requests'] > 0:
+            avg_response_time = stats_copy['total_response_time'] / stats_copy['total_requests']
+        else:
+            avg_response_time = 0
+        
+        # 格式化统计数据
+        formatted_stats = {
+            'total_requests': stats_copy['total_requests'],
+            'average_response_time': round(avg_response_time, 3),
+            'max_response_time': round(stats_copy['max_response_time'], 3),
+            'min_response_time': round(stats_copy['min_response_time'], 3) if stats_copy['min_response_time'] != float('inf') else 0,
+            'uptime_seconds': round(time.time() - stats_copy['last_reset_time'], 0),
+            'status_codes': stats_copy['status_code_stats'],
+            'methods': stats_copy['method_stats'],
+            'endpoints': {}
+        }
+        
+        # 格式化端点统计
+        for endpoint, data in stats_copy['endpoint_stats'].items():
+            endpoint_avg_time = data['total_time'] / data['count'] if data['count'] > 0 else 0
+            formatted_stats['endpoints'][endpoint] = {
+                'count': data['count'],
+                'average_response_time': round(endpoint_avg_time, 3),
+                'status_codes': data['status_codes']
+            }
+        
+        return formatted_stats
+
+def reset_request_stats():
+    """重置请求统计数据"""
+    with stats_lock:
+        global request_stats
+        request_stats = {
+            'total_requests': 0,
+            'endpoint_stats': {},
+            'status_code_stats': {},
+            'method_stats': {},
+            'total_response_time': 0,
+            'max_response_time': 0,
+            'min_response_time': float('inf'),
+            'last_reset_time': time.time()
+        }
+    logger.info("📊 请求统计数据已重置")
 
 def init_professional_components():
     """初始化专业组件"""
@@ -134,6 +398,8 @@ cipher, smtp_configured = init_professional_components()
 
 def safe_init_database():
     """安全地初始化数据库"""
+    global db_pool
+    
     if not config.DATABASE_URL:
         logger.info("💾 使用本地文件存储（未配置数据库）")
         return False
@@ -147,6 +413,20 @@ def safe_init_database():
         
         if success:
             logger.info("✅ 数据库初始化成功")
+            
+            # 初始化连接池
+            try:
+                db_pool = pool.ThreadedConnectionPool(
+                    minconn=2,  # 最小连接数
+                    maxconn=10,  # 最大连接数
+                    dsn=config.DATABASE_URL
+                )
+                logger.info("✅ 数据库连接池初始化成功")
+            except Exception as pool_error:
+                logger.error(f"❌ 连接池初始化失败: {pool_error}")
+                logger.warning("⚠️  降级到单连接模式")
+                db_pool = None
+            
             return True
         else:
             logger.warning("⚠️  数据库初始化失败，降级到文件存储")
@@ -198,6 +478,162 @@ def require_api_key(f):
             return jsonify({"error": "未授权"}), 401
         return f(*args, **kwargs)
     return decorated_function
+
+def rate_limit(limit_type='default'):
+    """API速率限制装饰器"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            global request_store
+            
+            # 获取客户端IP
+            client_ip = request.remote_addr
+            
+            # 获取限制配置
+            limit_config = RATE_LIMITS.get(limit_type, RATE_LIMITS['default'])
+            limit = limit_config['limit']
+            window = limit_config['window']
+            
+            # 清理过期记录并检查限制
+            current_time = time.time()
+            
+            with request_store_lock:
+                # 确保客户端IP的记录存在
+                if client_ip not in request_store:
+                    request_store[client_ip] = []
+                
+                # 清理过期的请求记录
+                request_store[client_ip] = [
+                    timestamp for timestamp in request_store[client_ip]
+                    if current_time - timestamp < window
+                ]
+                
+                # 检查是否超过限制
+                if len(request_store[client_ip]) >= limit:
+                    logger.warning(f"速率限制触发: {client_ip}, 类型: {limit_type}")
+                    return jsonify({
+                        "error": "请求过于频繁，请稍后再试",
+                        "limit": limit,
+                        "window": window,
+                        "retry_after": int(window - (current_time - min(request_store[client_ip])) + 1)
+                    }), 429
+                
+                # 记录新请求
+                request_store[client_ip].append(current_time)
+                
+                # 定期清理过期数据（防止内存泄漏）
+                if len(request_store) > 1000:  # 当IP数量超过1000时清理
+                    expired_ips = []
+                    for ip, timestamps in request_store.items():
+                        filtered = [t for t in timestamps if current_time - t < window]
+                        if not filtered:
+                            expired_ips.append(ip)
+                        else:
+                            request_store[ip] = filtered
+                    
+                    for ip in expired_ips:
+                        del request_store[ip]
+            
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
+def validate_request(content_types=None):
+    """请求验证装饰器"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            # 验证Content-Type
+            if content_types:
+                content_type = request.content_type
+                if not any(ct in content_type for ct in content_types):
+                    return jsonify({
+                        "error": f"不支持的Content-Type",
+                        "supported_types": content_types,
+                        "received_type": content_type
+                    }), 415
+            
+            # 验证请求大小
+            max_size = 1024 * 1024  # 1MB
+            if request.content_length and request.content_length > max_size:
+                return jsonify({
+                    "error": "请求体过大",
+                    "max_size": max_size,
+                    "received_size": request.content_length
+                }), 413
+            
+            # 验证请求方法
+            if request.method in ['POST', 'PUT', 'PATCH']:
+                try:
+                    if request.is_json:
+                        data = request.json
+                        if data is None:
+                            return jsonify({
+                                "error": "请求体为空或格式错误"
+                            }), 400
+                except Exception as e:
+                    return jsonify({
+                        "error": "请求体格式错误",
+                        "details": str(e)
+                    }), 400
+            
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
+def get_db_connection():
+    """获取数据库连接"""
+    global db_pool
+    
+    try:
+        # 优先使用连接池
+        if db_pool:
+            conn = db_pool.getconn()
+            logger.debug("从连接池获取连接")
+            return conn
+        else:
+            # 回退到直接连接
+            logger.warning("连接池不可用，使用直接连接")
+            import psycopg2
+            return psycopg2.connect(config.DATABASE_URL)
+    except Exception as e:
+        logger.error(f"获取数据库连接失败: {e}")
+        # 再次尝试直接连接
+        import psycopg2
+        return psycopg2.connect(config.DATABASE_URL)
+
+def put_db_connection(conn):
+    """归还数据库连接"""
+    global db_pool
+    
+    try:
+        if db_pool:
+            db_pool.putconn(conn)
+            logger.debug("连接归还到连接池")
+        else:
+            conn.close()
+    except Exception as e:
+        logger.error(f"归还连接失败: {e}")
+        # 如果是直接连接，手动关闭
+        conn.close()
+
+def error_response(code, message, details=None, request_id=None):
+    """统一的错误响应函数"""
+    error_response = {
+        "error": message,
+        "code": code,
+        "timestamp": datetime.now().isoformat(),
+        "path": request.path,
+        "method": request.method
+    }
+    
+    if details:
+        error_response["details"] = details
+    
+    if request_id:
+        error_response["request_id"] = request_id
+    
+    return jsonify(error_response), code
 
 def generate_professional_activation_code(email, product_type="personal", 
                                          purchase_id="", product_name=""):
@@ -497,7 +933,7 @@ def save_to_database(email, activation_code, activation_data):
         import psycopg2
         import psycopg2.extras
         
-        conn = psycopg2.connect(config.DATABASE_URL)
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         cursor.execute('''
@@ -517,7 +953,7 @@ def save_to_database(email, activation_code, activation_data):
         
         conn.commit()
         cursor.close()
-        conn.close()
+        put_db_connection(conn)
         
         logger.info(f"💾 激活码保存到数据库: {activation_code[:20]}...")
         return True
@@ -525,6 +961,150 @@ def save_to_database(email, activation_code, activation_data):
     except Exception as e:
         logger.error(f"数据库保存失败: {e}")
         return save_to_file(email, activation_code, activation_data)
+
+def verify_from_database(activation_code, device_id, device_name):
+    """从数据库验证激活码"""
+    try:
+        import psycopg2
+        import psycopg2.extras
+        
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # 查询激活码
+        cursor.execute('''
+        SELECT * FROM activations WHERE activation_code = %s
+        ''', (activation_code,))
+        
+        activation = cursor.fetchone()
+        
+        if not activation:
+            cursor.close()
+            put_db_connection(conn)
+            return False, "激活码不存在", {}
+        
+        # 检查是否过期
+        valid_until = activation['valid_until']
+        if datetime.now() > valid_until:
+            cursor.close()
+            put_db_connection(conn)
+            return False, "激活码已过期", {}
+        
+        # 检查设备限制
+        cursor.execute('''
+        SELECT COUNT(*) as device_count 
+        FROM device_activations 
+        WHERE activation_id = %s AND is_active = TRUE
+        ''', (activation['id'],))
+        
+        device_count = cursor.fetchone()['device_count']
+        
+        if device_count >= activation['max_devices']:
+            cursor.close()
+            put_db_connection(conn)
+            return False, f"已达到最大设备数限制 ({activation['max_devices']} 台)", {}
+        
+        # 检查设备是否已激活
+        cursor.execute('''
+        SELECT * FROM device_activations 
+        WHERE activation_id = %s AND device_id = %s
+        ''', (activation['id'], device_id))
+        
+        existing_device = cursor.fetchone()
+        
+        if existing_device:
+            # 更新现有设备激活
+            cursor.execute('''
+            UPDATE device_activations 
+            SET last_used = CURRENT_TIMESTAMP, is_active = TRUE
+            WHERE id = %s
+            ''', (existing_device['id'],))
+        else:
+            # 创建新设备激活
+            cursor.execute('''
+            INSERT INTO device_activations (activation_id, device_id, device_name)
+            VALUES (%s, %s, %s)
+            ''', (activation['id'], device_id, device_name))
+        
+        # 更新激活码状态
+        cursor.execute('''
+        UPDATE activations 
+        SET is_used = TRUE, used_at = CURRENT_TIMESTAMP, used_by_device = %s
+        WHERE id = %s
+        ''', (device_id, activation['id']))
+        
+        conn.commit()
+        cursor.close()
+        put_db_connection(conn)
+        
+        # 计算剩余天数
+        days_remaining = (valid_until - datetime.now()).days
+        
+        # 激活数据
+        activation_data = {
+            "product_type": activation['product_type'],
+            "max_devices": activation['max_devices'],
+            "valid_until": activation['valid_until'].isoformat(),
+            "device_id": device_id,
+            "device_name": device_name,
+            "days_remaining": days_remaining,
+            "email": activation['email'],
+            "activation_id": activation['id']
+        }
+        
+        return True, "激活成功", activation_data
+        
+    except Exception as e:
+        logger.error(f"数据库验证失败: {e}")
+        return False, f"数据库验证失败: {str(e)}", {}
+
+def verify_from_file(activation_code, device_id, device_name):
+    """从文件验证激活码"""
+    try:
+        filename = "activations.csv"
+        
+        if not os.path.exists(filename):
+            return False, "激活码数据库不存在", {}
+        
+        import csv
+        
+        with open(filename, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row['激活码'] == activation_code:
+                    # 检查有效期
+                    valid_until = datetime.fromisoformat(row['有效期至'])
+                    if datetime.now() > valid_until:
+                        return False, "激活码已过期", {}
+                    
+                    # 计算剩余天数
+                    days_remaining = (valid_until - datetime.now()).days
+                    
+                    # 假设最大设备数为3
+                    max_devices = 3
+                    if row['产品类型'] == 'business':
+                        max_devices = 10
+                    elif row['产品类型'] == 'enterprise':
+                        max_devices = 99
+                    
+                    # 激活数据
+                    activation_data = {
+                        "product_type": row['产品类型'],
+                        "max_devices": max_devices,
+                        "valid_until": valid_until.isoformat(),
+                        "device_id": device_id,
+                        "device_name": device_name,
+                        "days_remaining": days_remaining,
+                        "email": row['邮箱']
+                    }
+                    
+                    return True, "激活成功", activation_data
+        
+        return False, "激活码不存在", {}
+        
+    except Exception as e:
+        logger.error(f"文件验证失败: {e}")
+        return False, f"文件验证失败: {str(e)}", {}
 
 def save_to_file(email, activation_code, activation_data):
     """保存到本地文件"""
@@ -568,8 +1148,13 @@ def keep_service_awake():
             response = requests.get(service_url, timeout=10)
             logger.info(f"💓 心跳保持: {response.status_code}")
             
+            # 定期清理过期缓存
+            cleanup_cache()
+            
         except Exception as e:
             logger.error(f"心跳失败: {e}")
+            # 即使心跳失败，也要清理缓存
+            cleanup_cache()
 
 # ==================== API 路由 ====================
 
@@ -649,6 +1234,7 @@ def health_check():
             "timestamp": datetime.now().isoformat()
         }), 500
 
+@rate_limit('default')
 @app.route('/api/status', methods=['GET'])
 def server_status():
     """服务器实时状态"""
@@ -688,6 +1274,8 @@ def server_status():
         return jsonify({"error": str(e)}), 500
 
 # ==================== Gumroad Webhook 处理 ====================
+@rate_limit('webhook')
+@validate_request(['application/json', 'application/x-www-form-urlencoded'])
 @app.route('/api/webhook/gumroad', methods=['POST'])
 def webhook_gumroad():
     """处理Gumroad Webhook - 支持 form-urlencoded 格式"""
@@ -914,7 +1502,7 @@ def check_purchase(sale_id):
         import psycopg2
         import psycopg2.extras
         
-        conn = psycopg2.connect(config.DATABASE_URL)
+        conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
         # 检查 purchases 表
@@ -932,7 +1520,8 @@ def check_purchase(sale_id):
         ''', (sale_id, sale_id))
         activation = cursor.fetchone()
         
-        conn.close()
+        cursor.close()
+        put_db_connection(conn)
         
         return jsonify({
             "sale_id": sale_id,
@@ -960,7 +1549,7 @@ def check_activation(activation_code):
         import psycopg2
         import psycopg2.extras
         
-        conn = psycopg2.connect(config.DATABASE_URL)
+        conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
         cursor.execute('''
@@ -968,7 +1557,8 @@ def check_activation(activation_code):
         ''', (activation_code,))
         
         activation = cursor.fetchone()
-        conn.close()
+        cursor.close()
+        put_db_connection(conn)
         
         if activation:
             return jsonify({
@@ -1000,7 +1590,7 @@ def list_purchases():
         import psycopg2
         import psycopg2.extras
         
-        conn = psycopg2.connect(config.DATABASE_URL)
+        conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
         cursor.execute('''
@@ -1018,7 +1608,8 @@ def list_purchases():
         ''')
         
         purchases = cursor.fetchall()
-        conn.close()
+        cursor.close()
+        put_db_connection(conn)
         
         return jsonify({
             "success": True,
@@ -1033,6 +1624,8 @@ def list_purchases():
 # ==================== 管理端点 ====================
 @app.route('/api/generate', methods=['POST'])
 @require_api_key
+@rate_limit('admin')
+@validate_request(['application/json'])
 def api_generate():
     """生成激活码"""
     try:
@@ -1064,6 +1657,8 @@ def api_generate():
         logger.error(f"生成激活码失败: {e}")
         return jsonify({"error": "服务器错误"}), 500
 
+@rate_limit('verify')
+@validate_request(['application/json'])
 @app.route('/api/verify', methods=['POST'])
 def api_verify():
     """验证激活码"""
@@ -1078,43 +1673,40 @@ def api_verify():
         if not activation_code:
             return jsonify({"error": "激活码是必需的"}), 400
         
-        # 基本格式验证
-        #if not activation_code.startswith("PDF-"):
-        #    return jsonify({
-        #        "valid": False,
-        #        "message": "无效的激活码格式"
-        #    })
+        # 清理激活码格式
+        code_clean = activation_code.replace('-', '').replace(' ', '')
         
-        # 提取产品类型
-        product_type = 'personal'
-        if len(activation_code) > 4:
-            code_char = activation_code[4]
-            if code_char == 'B':
-                product_type = 'business'
-            elif code_char == 'E':
-                product_type = 'enterprise'
+        # 验证激活码
+        if config.DATABASE_URL:
+            # 从数据库验证
+            valid, message, activation_data = verify_from_database(activation_code, device_id, device_name)
+        else:
+            # 从文件验证
+            valid, message, activation_data = verify_from_file(activation_code, device_id, device_name)
         
-        # 模拟验证结果
-        max_devices = 3 if product_type == "personal" else 10
+        if not valid:
+            logger.warning(f"❌ 激活码验证失败: {activation_code} -> {message}")
+            return jsonify({
+                "valid": False,
+                "message": message,
+                "data": {}
+            })
         
+        # 记录验证成功
         logger.info(f"✅ 验证激活码: {activation_code} -> {device_id}")
         
         return jsonify({
             "valid": True,
             "message": "激活成功",
-            "data": {
-                "product_type": product_type,
-                "max_devices": max_devices,
-                "valid_until": (datetime.now() + timedelta(days=365)).isoformat(),
-                "device_id": device_id,
-                "device_name": device_name
-            }
+            "data": activation_data
         })
         
     except Exception as e:
         logger.error(f"验证激活码失败: {e}")
         return jsonify({"error": "服务器错误"}), 500
 
+@rate_limit('default')
+@validate_request(['application/json'])
 @app.route('/api/manual-activate', methods=['POST'])
 def manual_activate():
     """手动触发激活（用于测试和调试）"""
@@ -1202,7 +1794,7 @@ def list_activations():
                 import psycopg2
                 import psycopg2.extras
                 
-                conn = psycopg2.connect(config.DATABASE_URL)
+                conn = get_db_connection()
                 cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
                 
                 cursor.execute('''
@@ -1213,7 +1805,8 @@ def list_activations():
                 ''')
                 
                 activations = cursor.fetchall()
-                conn.close()
+                cursor.close()
+                put_db_connection(conn)
                 
             except Exception as db_error:
                 logger.error(f"数据库查询失败: {db_error}")
@@ -1246,20 +1839,44 @@ def list_activations():
 @app.errorhandler(404)
 def not_found(error):
     logger.warning(f"404 错误: {request.path}")
-    return jsonify({"error": "未找到请求的资源"}), 404
+    return error_response(404, "未找到请求的资源", details={"requested_path": request.path})
 
 @app.errorhandler(405)
 def method_not_allowed(error):
-    return jsonify({"error": "方法不允许"}), 405
+    allowed_methods = request.url_rule.methods if request.url_rule else []
+    return error_response(405, "方法不允许", details={"allowed_methods": list(allowed_methods)})
+
+@app.errorhandler(400)
+def bad_request(error):
+    logger.warning(f"400 错误: {error}")
+    return error_response(400, "请求参数错误", details={"error": str(error)})
+
+@app.errorhandler(401)
+def unauthorized(error):
+    logger.warning(f"401 错误: 未授权访问")
+    return error_response(401, "未授权访问", details={"realm": "PDF Fusion Pro 激活服务器"})
+
+@app.errorhandler(403)
+def forbidden(error):
+    logger.warning(f"403 错误: 禁止访问")
+    return error_response(403, "禁止访问", details={"path": request.path})
+
+@app.errorhandler(415)
+def unsupported_media_type(error):
+    return error_response(415, "不支持的媒体类型", details={"content_type": request.content_type})
+
+@app.errorhandler(429)
+def too_many_requests(error):
+    return error_response(429, "请求过于频繁", details={"retry_after": "60"})
 
 @app.errorhandler(500)
 def internal_error(error):
-    logger.error(f"服务器内部错误: {error}")
-    return jsonify({"error": "服务器内部错误"}), 500
+    logger.error(f"服务器内部错误: {error}", exc_info=True)
+    return error_response(500, "服务器内部错误", details={"error_type": str(type(error).__name__)})
 
 # ==================== 启动应用 ====================
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 5000))
+    port = int(config.SERVER_PORT)
     
     logger.info("=" * 60)
     logger.info(f"🚀 启动 PDF Fusion Pro 激活服务器")
@@ -1269,7 +1886,11 @@ if __name__ == '__main__':
     logger.info(f"📧 邮件服务: {'已配置' if smtp_configured else '未配置'}")
     logger.info(f"💾 存储方式: {'数据库' if database_initialized else '文件'}")
     logger.info(f"🌐 服务端口: {port}")
-    logger.info(f"🔗 Webhook地址: http://0.0.0.0:{port}/api/webhook/gumroad")
+    logger.info(f"⏱️  服务器超时: {config.SERVER_TIMEOUT}秒")
+    logger.info(f"⏱️  请求超时: {config.REQUEST_TIMEOUT}秒")
+    logger.info(f"� 缓存配置: {'已启用' if config.CACHE_ENABLED else '未启用'} (TTL: {config.CACHE_TTL}秒)")
+    logger.info(f"🐛 调试模式: {'开启' if config.DEBUG_MODE else '关闭'}")
+    logger.info(f"�� Webhook地址: http://0.0.0.0:{port}/api/webhook/gumroad")
     logger.info(f"🌍 公网地址: https://pdf-email-1.onrender.com/api/webhook/gumroad")
     logger.info("=" * 60)
     
@@ -1279,7 +1900,11 @@ if __name__ == '__main__':
     logger.info("💓 心跳保持线程已启动")
     
     # 运行应用
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(
+        host='0.0.0.0', 
+        port=port, 
+        debug=config.DEBUG_MODE
+    )
 
 
 
