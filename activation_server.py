@@ -1108,19 +1108,21 @@ def verify_from_file(activation_code, device_id, device_name):
         
         for encoding in encodings:
             try:
-                logger.debug(f"尝试使用编码读取文件: {encoding}")
+                logger.info(f"尝试使用编码读取文件: {encoding}")
                 with open(filename, 'r', encoding=encoding) as f:
                     reader = csv.DictReader(f)
                     
+                    logger.info(f"成功读取文件，开始检查激活码记录")
+                    
                     for row in reader:
-                        # 清理文件中激活码的格式
+                        # 获取文件中的激活码（已为清理后的小写格式）
                         row_code = row.get('激活码', '')
-                        row_code_clean = row_code.replace('-', '').replace(' ', '').lower()
+                        logger.info(f"文件中激活码: '{row_code}'")
+                        logger.info(f"验证激活码: '{activation_code_clean}'")
+                        logger.info(f"比较结果: '{row_code}' == '{activation_code_clean}' → {row_code == activation_code_clean}")
                         
-                        logger.debug(f"文件中激活码 (清理后): {row_code_clean}")
-                        
-                        # 精确比较清理后的激活码
-                        if row_code_clean == activation_code_clean:
+                        # 直接比较，因为文件中已为清理后的小写格式
+                        if row_code == activation_code_clean:
                             # 检查有效期
                             valid_until_str = row.get('有效期至', '')
                             logger.info(f"有效期: {valid_until_str}")
@@ -1168,7 +1170,7 @@ def verify_from_file(activation_code, device_id, device_name):
                 break
                 
             except UnicodeDecodeError as e:
-                logger.debug(f"编码 {encoding} 读取失败: {e}")
+                logger.warning(f"编码 {encoding} 读取失败: {e}")
                 continue
             except Exception as e:
                 logger.error(f"文件处理失败: {e}")
@@ -1190,6 +1192,9 @@ def save_to_file(email, activation_code, activation_data):
     try:
         import csv
         
+        # 清理激活码格式，与数据库保存格式一致（统一转换为小写）
+        activation_code_clean = activation_code.replace('-', '').replace(' ', '').lower()
+        
         # 使用绝对路径确保文件能被找到
         filename = os.path.join(os.path.dirname(__file__), "activations.csv")
         file_exists = os.path.exists(filename)
@@ -1202,13 +1207,13 @@ def save_to_file(email, activation_code, activation_data):
             writer.writerow([
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 email,
-                activation_code,
+                activation_code_clean,  # 保存清理后的激活码，与数据库格式一致
                 activation_data['product_type'],
                 activation_data['valid_until'][:10],
                 activation_data['max_devices']
             ])
         
-        logger.info(f"📄 激活码保存到文件: {activation_code} ({filename})")
+        logger.info(f"📄 激活码保存到文件: {activation_code_clean} ({filename})")
         return True
         
     except Exception as e:
