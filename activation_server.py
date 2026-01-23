@@ -947,8 +947,8 @@ def save_to_database(email, activation_code, activation_data):
         import psycopg2
         import psycopg2.extras
         
-        # 清理激活码格式，确保与验证时使用的格式一致
-        activation_code_clean = activation_code.replace('-', '').replace(' ', '')
+        # 清理激活码格式，确保与验证时使用的格式一致（统一转换为小写）
+        activation_code_clean = activation_code.replace('-', '').replace(' ', '').lower()
         
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -985,8 +985,8 @@ def verify_from_database(activation_code, device_id, device_name):
         import psycopg2
         import psycopg2.extras
         
-        # 清理激活码格式（与其他函数保持一致）
-        activation_code = activation_code.replace('-', '').replace(' ', '')
+        # 清理激活码格式（统一转换为小写，与保存时格式一致）
+        activation_code = activation_code.replace('-', '').replace(' ', '').lower()
         
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -1753,8 +1753,8 @@ def api_verify():
         if not activation_code:
             return jsonify({"error": "激活码是必需的"}), 400
         
-        # 清理激活码格式
-        code_clean = activation_code.replace('-', '').replace(' ', '')
+        # 清理激活码格式（统一转换为小写，与保存时格式一致）
+        code_clean = activation_code.replace('-', '').replace(' ', '').lower()
         
         # 验证激活码
         if config.DATABASE_URL and database_initialized:
