@@ -923,14 +923,22 @@ This email is automatically sent, please do not reply directly.
         return False
 
 def save_activation_record(email, activation_code, activation_data):
-    """保存激活记录到数据库或文件"""
+    """保存激活记录到数据库和文件"""
     try:
+        # 总是保存到文件，无论是否配置了数据库
+        file_result = save_to_file(email, activation_code, activation_data)
+        
+        # 如果配置了数据库，也保存到数据库
         if config.DATABASE_URL:
-            return save_to_database(email, activation_code, activation_data)
+            db_result = save_to_database(email, activation_code, activation_data)
+            logger.info(f"💾 激活码已保存到数据库和文件")
+            return db_result and file_result
         else:
-            return save_to_file(email, activation_code, activation_data)
+            logger.info(f"💾 激活码已保存到文件")
+            return file_result
     except Exception as e:
         logger.error(f"保存记录失败: {e}")
+        # 即使数据库保存失败，也要尝试保存到文件
         return save_to_file(email, activation_code, activation_data)
 
 def save_to_database(email, activation_code, activation_data):
@@ -938,6 +946,9 @@ def save_to_database(email, activation_code, activation_data):
     try:
         import psycopg2
         import psycopg2.extras
+        
+        # 清理激活码格式，确保与验证时使用的格式一致
+        activation_code_clean = activation_code.replace('-', '').replace(' ', '')
         
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -949,7 +960,7 @@ def save_to_database(email, activation_code, activation_data):
         ON CONFLICT (activation_code) DO NOTHING
         ''', (
             email,
-            activation_code,
+            activation_code_clean,
             activation_data['product_type'],
             activation_data['days_valid'],
             activation_data['max_devices'],
@@ -961,7 +972,7 @@ def save_to_database(email, activation_code, activation_data):
         cursor.close()
         put_db_connection(conn)
         
-        logger.info(f"💾 激活码保存到数据库: {activation_code[:20]}...")
+        logger.info(f"💾 激活码保存到数据库: {activation_code_clean[:20]}...")
         return True
         
     except Exception as e:
@@ -974,8 +985,8 @@ def verify_from_database(activation_code, device_id, device_name):
         import psycopg2
         import psycopg2.extras
         
-        # 清理激活码格式
-        activation_code = activation_code.replace('-', '').replace(' ', '').lower()
+        # 清理激活码格式（与其他函数保持一致）
+        activation_code = activation_code.replace('-', '').replace(' ', '')
         
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -1092,42 +1103,21 @@ def verify_from_file(activation_code, device_id, device_name):
         
         import csv
         
-        # 尝试使用不同的编码读取文件
-        encodings = ['utf-8', 'utf-8-sig', 'gbk', 'gb2312']
-        reader = None
+        # 只使用utf-8相关编码，因为我们保存时使用的是utf-8
+        encodings = ['utf-8', 'utf-8-sig']
         
         for encoding in encodings:
             try:
-                logger.info(f"尝试使用编码读取文件: {encoding}")
-                with open(filename, 'r', encoding=encoding) as f:
-                    reader = csv.DictReader(f)
-                    # 测试读取第一行
-                    header = reader.fieldnames
-                    logger.info(f"文件头: {header}")
-                break
-            except Exception as e:
-                logger.warning(f"编码 {encoding} 读取失败: {e}")
-                continue
-        
-        if not reader:
-            logger.error("❌ 无法读取激活码文件，所有编码尝试失败")
-            return False, "无法读取激活码数据库", {}
-        
-        # 重新打开文件进行验证
-        for encoding in encodings:
-            try:
+                logger.debug(f"尝试使用编码读取文件: {encoding}")
                 with open(filename, 'r', encoding=encoding) as f:
                     reader = csv.DictReader(f)
                     
                     for row in reader:
-                        logger.info(f"读取到激活码记录: {row.get('激活码', '未知')[:30]}...")
-                        
                         # 清理文件中激活码的格式
                         row_code = row.get('激活码', '')
                         row_code_clean = row_code.replace('-', '').replace(' ', '').lower()
                         
-                        logger.info(f"文件中激活码 (清理后): {row_code_clean}")
-                        logger.info(f"比较结果: {row_code_clean} == {activation_code_clean} → {row_code_clean == activation_code_clean}")
+                        logger.debug(f"文件中激活码 (清理后): {row_code_clean}")
                         
                         # 精确比较清理后的激活码
                         if row_code_clean == activation_code_clean:
@@ -1173,10 +1163,18 @@ def verify_from_file(activation_code, device_id, device_name):
                             
                             logger.info(f"✅ 激活码验证成功: {activation_code}")
                             return True, "激活成功", activation_data
-                            
-            except Exception as e:
-                logger.warning(f"编码 {encoding} 处理失败: {e}")
+                
+                # 如果成功读取但没有找到匹配的激活码，直接退出循环
+                break
+                
+            except UnicodeDecodeError as e:
+                logger.debug(f"编码 {encoding} 读取失败: {e}")
                 continue
+            except Exception as e:
+                logger.error(f"文件处理失败: {e}")
+                import traceback
+                logger.error(f"错误堆栈: {traceback.format_exc()}")
+                break
         
         logger.warning(f"❌ 激活码未找到: {activation_code}")
         return False, "激活码不存在", {}
@@ -1192,7 +1190,8 @@ def save_to_file(email, activation_code, activation_data):
     try:
         import csv
         
-        filename = "activations.csv"
+        # 使用绝对路径确保文件能被找到
+        filename = os.path.join(os.path.dirname(__file__), "activations.csv")
         file_exists = os.path.exists(filename)
         
         with open(filename, 'a', newline='', encoding='utf-8') as f:
@@ -1209,7 +1208,7 @@ def save_to_file(email, activation_code, activation_data):
                 activation_data['max_devices']
             ])
         
-        logger.info(f"📄 激活码保存到文件: {activation_code}")
+        logger.info(f"📄 激活码保存到文件: {activation_code} ({filename})")
         return True
         
     except Exception as e:
@@ -1791,6 +1790,44 @@ def api_verify():
         logger.error(f"验证激活码失败: {e}")
         return jsonify({"error": "服务器错误"}), 500
 
+@app.route('/api/trial', methods=['POST'])
+@rate_limit('default')
+@validate_request(['application/json'])
+def api_trial():
+    """处理试用期相关请求"""
+    try:
+        data = request.json
+        action = data.get('action', 'check_trial')
+        machine_id = data.get('machine_id')
+        
+        if not machine_id:
+            return jsonify({"success": False, "error": "机器ID是必需的"}), 400
+        
+        if action == 'check_trial':
+            # 检查试用期信息
+            # 这里可以根据需要实现试用期检查逻辑
+            logger.info(f"检查试用期信息: {machine_id}")
+            return jsonify({
+                "success": True,
+                "data": {
+                    "trial_expired": True,  # 示例返回，实际逻辑需根据需求实现
+                    "message": "试用期检查成功"
+                }
+            })
+        elif action == 'report_trial':
+            # 报告试用期状态
+            logger.info(f"报告试用期状态: {machine_id}")
+            return jsonify({
+                "success": True,
+                "message": "试用期状态报告成功"
+            })
+        else:
+            return jsonify({"success": False, "error": "不支持的操作"}), 400
+            
+    except Exception as e:
+        logger.error(f"处理试用期请求失败: {e}")
+        return jsonify({"success": False, "error": "服务器错误"}), 500
+
 @rate_limit('default')
 @validate_request(['application/json'])
 @app.route('/api/manual-activate', methods=['POST'])
@@ -1901,7 +1938,8 @@ def list_activations():
         if not activations:
             try:
                 import csv
-                filename = "activations.csv"
+                # 使用绝对路径确保文件能被找到
+                filename = os.path.join(os.path.dirname(__file__), "activations.csv")
                 
                 if os.path.exists(filename):
                     with open(filename, 'r', encoding='utf-8') as f:
